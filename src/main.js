@@ -20,6 +20,7 @@ app.innerHTML = `
         <div class="controls">
           <span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移动</span>
           <span><kbd>鼠标</kbd> 看向</span>
+          <span><kbd>E</kbd> 交互</span>
           <span><kbd>Shift</kbd> 慢走</span>
           <span><kbd>Esc</kbd> 释放鼠标</span>
         </div>
@@ -30,19 +31,42 @@ app.innerHTML = `
       <form class="composer" id="composer">
         <label for="dream-input">
           梦的碎片
-          <span class="hint">输入后重建场景</span>
+          <span class="hint">先解析分镜，再生成场景</span>
         </label>
         <textarea id="dream-input" spellcheck="false"></textarea>
         <div class="button-row">
-          <button class="primary" type="submit">生成梦境</button>
+          <button class="primary" type="submit">解析梦境</button>
+          <button type="button" id="generate-direct">直接生成</button>
           <button type="button" id="replay">重放触发</button>
         </div>
       </form>
+
+      <section class="draft-panel hidden" id="draft-panel">
+        <div class="draft-header">
+          <div>
+            <p class="eyebrow">Dream Breakdown</p>
+            <h2>分镜确认</h2>
+          </div>
+          <button type="button" id="close-draft" aria-label="关闭分镜">×</button>
+        </div>
+        <label class="story-label" for="story-output">润色后的梦境文本</label>
+        <textarea id="story-output" class="story-output" spellcheck="false"></textarea>
+        <div class="storyboard" id="storyboard"></div>
+        <div class="button-row">
+          <button class="primary" type="button" id="confirm-dream">确认并生成可回放梦境</button>
+          <button type="button" id="refresh-draft">重新解析</button>
+          <button type="button" id="save-dream">保存 .redream</button>
+          <button type="button" id="load-dream">导入 .redream</button>
+        </div>
+        <input class="file-input" id="dream-file" type="file" accept=".redream,application/json" />
+      </section>
 
       <div class="event-log" id="event-log">
         <strong>触发记录</strong>
         <div class="entry">还没有触发。靠近发光物体试试。</div>
       </div>
+
+      <div class="interaction-prompt hidden" id="interaction-prompt">按 E 触发</div>
 
       <div class="dialogue hidden" id="dialogue">
         <div class="speaker" id="speaker">NPC</div>
@@ -55,7 +79,7 @@ app.innerHTML = `
       <div class="overlay" id="overlay">
         <div class="start-card">
           <h2>把梦走回去</h2>
-          <p>这是一个可玩的最小原型：你可以用碎片化描述生成一段梦核场景，然后第一视角移动，靠近特定地点触发停电、影子和对白。</p>
+          <p>这是一个可玩的最小原型：先把碎片化梦境解析成分镜和触发器，确认后生成一段可以第一视角回放的梦核场景。</p>
           <button class="primary" id="start" type="button">进入梦境</button>
         </div>
       </div>
@@ -75,6 +99,17 @@ const line = document.querySelector("#line");
 const blackout = document.querySelector("#blackout");
 const eventLog = document.querySelector("#event-log");
 const replayButton = document.querySelector("#replay");
+const directGenerateButton = document.querySelector("#generate-direct");
+const draftPanel = document.querySelector("#draft-panel");
+const storyOutput = document.querySelector("#story-output");
+const storyboard = document.querySelector("#storyboard");
+const confirmDreamButton = document.querySelector("#confirm-dream");
+const refreshDraftButton = document.querySelector("#refresh-draft");
+const closeDraftButton = document.querySelector("#close-draft");
+const interactionPrompt = document.querySelector("#interaction-prompt");
+const saveDreamButton = document.querySelector("#save-dream");
+const loadDreamButton = document.querySelector("#load-dream");
+const dreamFileInput = document.querySelector("#dream-file");
 
 input.value = DEFAULT_DREAM;
 
@@ -117,6 +152,9 @@ let activeDialogueTimer = 0;
 let blackoutTimer = 0;
 let ghost = null;
 let eventCount = 0;
+let currentDraft = null;
+let pendingInteraction = null;
+let interactPressed = false;
 
 const palette = {
   concrete: new THREE.MeshStandardMaterial({ color: 0x77756b, roughness: 0.92, metalness: 0.05 }),
@@ -136,7 +174,303 @@ const palette = {
   shadow: new THREE.MeshStandardMaterial({ color: 0x060606, roughness: 0.6 }),
 };
 
-function buildDreamModel(text) {
+const LOCATION_WORDS = [
+  "门口",
+  "电梯",
+  "走廊",
+  "房间",
+  "医院",
+  "病房",
+  "地铁",
+  "站台",
+  "售票机",
+  "楼梯",
+  "学校",
+  "教室",
+  "家",
+  "客厅",
+  "商场",
+  "街",
+  "桥",
+  "海",
+  "神龛",
+  "庙",
+  "镜子",
+  "地下室",
+];
+
+const PERSON_WORDS = ["女生", "男生", "女人", "男人", "小孩", "妈妈", "爸爸", "朋友", "老师", "护士", "白衣人", "影子", "鬼", "陌生人", "主人公"];
+
+function compactText(text) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function splitSentences(text) {
+  return text
+    .replace(/\r/g, "")
+    .split(/(?<=[。！？!?])|\n+/)
+    .map((part) => compactText(part))
+    .filter(Boolean);
+}
+
+function splitIntoSceneTexts(text) {
+  const sentences = splitSentences(text);
+  if (sentences.length <= 1) return [compactText(text)];
+
+  const scenes = [];
+  let current = [];
+  const hardShift = /然后|后来|接着|突然|之后|走到|来到|到了|进入|停电|灯灭|触发|醒来|看见|遇到|发现|左边|右边|旁边|出现|说|有个|一个/;
+
+  for (const sentence of sentences) {
+    if (current.length && hardShift.test(sentence)) {
+      scenes.push(current.join(" "));
+      current = [];
+    }
+    current.push(sentence);
+    if (current.join("").length > 95) {
+      scenes.push(current.join(" "));
+      current = [];
+    }
+  }
+
+  if (current.length) scenes.push(current.join(" "));
+  return scenes.slice(0, 6);
+}
+
+function pickMatches(text, words) {
+  return words.filter((word) => text.includes(word));
+}
+
+function inferLocation(text, index) {
+  const matches = pickMatches(text, LOCATION_WORDS);
+  if (matches.length) return [...new Set(matches)].slice(0, 3).join(" / ");
+  return index === 0 ? "梦的入口" : `第 ${index + 1} 个梦境区域`;
+}
+
+function inferCharacters(text) {
+  const matches = pickMatches(text, PERSON_WORDS);
+  if (/我|自己|主人公/.test(text)) matches.unshift("主人公");
+  return [...new Set(matches)].slice(0, 4).join("、") || "主人公";
+}
+
+function inferMood(text) {
+  if (/开心|高兴|放松|温暖|安心/.test(text)) return "高兴的";
+  if (/害怕|恐怖|鬼|黑影|压抑|窒息|追|逃/.test(text)) return "压抑、紧张";
+  if (/神圣|庙|神龛|祭坛|光|圣/.test(text)) return "神圣又不安";
+  if (/水|雨|潮湿|海|淹/.test(text)) return "潮湿、迟滞";
+  if (/黑|停电|灯灭|夜/.test(text)) return "昏暗、悬着";
+  return "模糊、低压";
+}
+
+function inferTrigger(text, location) {
+  const talkTarget = text.match(/(?:和|跟|对)([^，。！？\s]{1,8})(?:说话|对话|讲话)/);
+  if (talkTarget) return `靠近${talkTarget[1]}并按 E 对话`;
+  if (/按|点击|打开|关上|拿起|触碰/.test(text)) return "靠近关键物体并按 E 交互";
+  if (/看|盯|注视/.test(text)) return "看向关键物体";
+  if (/停电|灯灭|断电/.test(text)) return `走到${location}后停电`;
+  return `走到${location}`;
+}
+
+function inferTriggerType(trigger, text) {
+  if (/对话|说话|按 E|交互|点击|打开|拿起|触碰/.test(`${trigger} ${text}`)) return "interaction";
+  if (/看向|注视|盯/.test(`${trigger} ${text}`)) return "gaze";
+  return "location";
+}
+
+function inferEvent(text, location) {
+  const trimmed = compactText(text).replace(/[。！？!?]$/, "");
+  if (trimmed.length > 8) return trimmed.slice(0, 90);
+  return `主人公来到${location}，梦境开始改变`;
+}
+
+function inferDialogue(text) {
+  const quoteMatch = text.match(/(?:说|说道|告诉我|广播)[:：]?\s*["“]?([^"”。，\n]{2,36})/);
+  if (quoteMatch) return quoteMatch[1].trim();
+  if (/停电|灯灭|断电/.test(text)) return "请留在原地。请不要回头。";
+  if (/鬼|影子|黑影/.test(text)) return "你不是第一次回来。";
+  if (/电梯/.test(text)) return "电梯门开着，但里面没有楼层。";
+  return "这里像是在等你把它想起来。";
+}
+
+function createDreamDraft(text) {
+  const source = compactText(text || DEFAULT_DREAM);
+  const sceneTexts = splitIntoSceneTexts(source);
+  const scenes = sceneTexts.map((sceneText, index) => {
+    const location = inferLocation(sceneText, index);
+    const trigger = inferTrigger(sceneText, location);
+    return {
+      id: `scene-${index + 1}`,
+      title: `场景 ${index + 1}：${location}`,
+      location,
+      characters: inferCharacters(sceneText),
+      event: inferEvent(sceneText, location),
+      mood: inferMood(sceneText),
+      trigger,
+      triggerType: inferTriggerType(trigger, sceneText),
+      dialogue: inferDialogue(sceneText),
+      source: sceneText,
+    };
+  });
+
+  return {
+    title: scenes[0]?.location ? `${scenes[0].location}的梦` : "未命名梦境",
+    raw: source,
+    story: polishDreamStory(scenes),
+    scenes,
+  };
+}
+
+function polishDreamStory(scenes) {
+  return scenes
+    .map((scene, index) => {
+      const lead = index === 0 ? "梦一开始" : index === scenes.length - 1 ? "到最后" : "后来";
+      return `${lead}，我在${scene.location}。这里的气氛是${scene.mood}，${scene.event}。${scene.characters.replace(/、/g, "和")}像是早就被安排在这里，只有我还不确定自己为什么会回来。触发点藏在“${scene.trigger}”这一刻：当它发生时，场景的秩序会突然松动，梦里的声音说：“${scene.dialogue}”`;
+    })
+    .join("\n\n");
+}
+
+function renderDraft(draft) {
+  currentDraft = draft;
+  storyOutput.value = draft.story;
+  storyboard.innerHTML = draft.scenes
+    .map(
+      (scene, index) => `
+        <article class="scene-card" data-index="${index}">
+          <div class="scene-card-head">
+            <strong>场景 ${index + 1}</strong>
+            <span>${scene.triggerType === "interaction" ? "交互触发" : scene.triggerType === "gaze" ? "注视触发" : "位置触发"}</span>
+          </div>
+          <label>地点<input data-field="location" value="${escapeAttribute(scene.location)}" /></label>
+          <label>人物<input data-field="characters" value="${escapeAttribute(scene.characters)}" /></label>
+          <label>事件<textarea data-field="event">${escapeHtml(scene.event)}</textarea></label>
+          <label>情绪<input data-field="mood" value="${escapeAttribute(scene.mood)}" /></label>
+          <label>触发点<input data-field="trigger" value="${escapeAttribute(scene.trigger)}" /></label>
+          <label>触发方式
+            <select data-field="triggerType">
+              <option value="location" ${scene.triggerType === "location" ? "selected" : ""}>走到地点自动触发</option>
+              <option value="interaction" ${scene.triggerType === "interaction" ? "selected" : ""}>靠近后按 E 交互</option>
+              <option value="gaze" ${scene.triggerType === "gaze" ? "selected" : ""}>看向物体触发</option>
+            </select>
+          </label>
+          <label>对白<input data-field="dialogue" value="${escapeAttribute(scene.dialogue)}" /></label>
+        </article>
+      `,
+    )
+    .join("");
+  draftPanel.classList.remove("hidden");
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapeAttribute(value) {
+  return escapeHtml(value).replace(/"/g, "&quot;");
+}
+
+function readDraftFromPanel() {
+  const scenes = [...storyboard.querySelectorAll(".scene-card")].map((card, index) => {
+    const read = (field) => card.querySelector(`[data-field="${field}"]`)?.value.trim() || "";
+    return {
+      id: currentDraft?.scenes[index]?.id || `scene-${index + 1}`,
+      title: `场景 ${index + 1}：${read("location") || "未命名地点"}`,
+      location: read("location") || "未命名地点",
+      characters: read("characters") || "主人公",
+      event: read("event") || "梦境发生了变化",
+      mood: read("mood") || "模糊",
+      trigger: read("trigger") || "走到这里",
+      triggerType: read("triggerType") || "location",
+      dialogue: read("dialogue") || "这里像是在等你回来。",
+      source: currentDraft?.scenes[index]?.source || "",
+    };
+  });
+
+  return {
+    title: scenes[0]?.location ? `${scenes[0].location}的梦` : "未命名梦境",
+    raw: input.value.trim() || DEFAULT_DREAM,
+    story: storyOutput.value.trim() || polishDreamStory(scenes),
+    scenes,
+  };
+}
+
+function getEditableDraft() {
+  if (!draftPanel.classList.contains("hidden") && storyboard.children.length) {
+    return readDraftFromPanel();
+  }
+  return currentDraft || createDreamDraft(input.value.trim() || DEFAULT_DREAM);
+}
+
+function saveDreamFile() {
+  const draft = getEditableDraft();
+  const payload = {
+    version: 1,
+    kind: "redream",
+    savedAt: new Date().toISOString(),
+    draft,
+  };
+  const safeName = (draft.title || "redream").replace(/[\\/:*?"<>|]/g, "").slice(0, 36) || "redream";
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${safeName}.redream`;
+  link.click();
+  URL.revokeObjectURL(url);
+  writeLog("梦境文件已保存。");
+}
+
+function loadDreamFile(file) {
+  const reader = new FileReader();
+  reader.addEventListener("load", () => {
+    try {
+      const payload = JSON.parse(String(reader.result || "{}"));
+      const draft = payload.draft || payload;
+      if (!draft?.scenes?.length) throw new Error("missing scenes");
+      currentDraft = draft;
+      input.value = draft.raw || input.value;
+      renderDraft(draft);
+      writeLog("已导入梦境文件，可修改后重新生成。");
+    } catch {
+      writeLog("导入失败：文件不是有效的 .redream。");
+    }
+  });
+  reader.readAsText(file);
+}
+
+function buildDreamModel(source) {
+  if (source?.scenes) {
+    const combined = [source.raw, source.story, ...source.scenes.flatMap((scene) => [scene.location, scene.characters, scene.event, scene.mood, scene.trigger])].join(" ");
+    const features = {
+      hasHospital: /医院|病房|走廊|白色|护士/.test(combined),
+      hasTrain: /地铁|车站|站台|售票|列车|隧道/.test(combined),
+      hasWater: /水|淹|潮湿|雨|海/.test(combined),
+      hasShrine: /神|庙|神龛|祭坛|香|圣|寺/.test(combined),
+      hasGhost: /鬼|影子|黑影|怪物|死人|灵/.test(combined),
+      hasBlackout: /停电|黑|灯灭|断电|熄灭/.test(combined),
+    };
+    return {
+      title: source.title,
+      mood: source.scenes.map((scene) => scene.mood).filter(Boolean).slice(0, 2).join("、") || "梦境化",
+      features,
+      story: source.story,
+      events: source.scenes.map((scene, index) => ({
+        id: scene.id,
+        label: scene.trigger || scene.location,
+        position: new THREE.Vector3(index % 2 === 0 ? -4.8 : 4.8, 1, -7 - index * 8.5),
+        color: [0xd6b36b, 0x7fc5d8, 0xd58b9b, 0x89d6a3, 0xc7a2df, 0xe0c46f][index % 6],
+        speaker: scene.characters.split(/[、,，/]/).find(Boolean) || "梦里的人",
+        line: scene.dialogue,
+        blackout: /停电|灯灭|断电|黑/.test(`${scene.event} ${scene.trigger}`),
+        ghost: /鬼|影子|黑影|陌生人/.test(`${scene.characters} ${scene.event}`),
+        triggerType: scene.triggerType,
+      })),
+    };
+  }
+
+  const text = source;
   const hasHospital = /医院|病房|走廊|白色|护士/.test(text);
   const hasTrain = /地铁|车站|站台|售票|列车|隧道/.test(text);
   const hasWater = /水|淹|潮湿|雨|海/.test(text);
@@ -157,6 +491,7 @@ function buildDreamModel(text) {
         color: 0xd6b36b,
         speaker: "白衣人",
         line: hasShrine ? "灯在闪。它像是在等你承认这是真的。" : "这盏灯不该在这里。",
+        triggerType: "location",
       },
       {
         id: "blackout",
@@ -166,6 +501,7 @@ function buildDreamModel(text) {
         speaker: "广播",
         line: hasBlackout ? "请留在原地。请不要回头。" : "下一班车已经取消。",
         blackout: hasBlackout,
+        triggerType: "location",
       },
       {
         id: "ghost",
@@ -175,6 +511,7 @@ function buildDreamModel(text) {
         speaker: hasGhost ? "影子" : "陌生人",
         line: quoteMatch ? quoteMatch[1].trim() : "你不是第一次回来。",
         ghost: true,
+        triggerType: "location",
       },
     ],
   };
@@ -245,9 +582,9 @@ function addTextPlane(text, position, color = 0xe9eadb) {
   world.add(mesh);
 }
 
-function buildWorld(text) {
+function buildWorld(source) {
   clearWorld();
-  dreamModel = buildDreamModel(text);
+  dreamModel = buildDreamModel(source);
   titleEl.textContent = dreamModel.title;
   statusEl.textContent = `${dreamModel.mood}。靠近发光位置会触发情节。`;
 
@@ -395,15 +732,41 @@ function updatePlayer(dt) {
 
 function updateTriggers(dt) {
   const p = yaw.position;
+  pendingInteraction = null;
+  let promptText = "";
+
   for (const item of triggerMeshes) {
     item.orb.rotation.y += dt * 1.5;
     item.orb.position.y = 1.45 + Math.sin(clock.elapsedTime * 2.4 + item.event.position.x) * 0.1;
     const distance = p.distanceTo(item.event.position);
     item.base.scale.setScalar(1 + Math.sin(clock.elapsedTime * 3) * 0.05);
-    if (!item.triggered && distance < 2.05) {
+
+    if (item.triggered) continue;
+
+    if (item.event.triggerType === "interaction" && distance < 2.45) {
+      pendingInteraction = item;
+      promptText = `按 E：${item.event.label}`;
+      if (interactPressed) fireEvent(item);
+      continue;
+    }
+
+    if (item.event.triggerType === "gaze" && distance < 5.5) {
+      const cameraDirection = new THREE.Vector3();
+      camera.getWorldDirection(cameraDirection);
+      const toTarget = item.event.position.clone().sub(p).normalize();
+      promptText = `看向：${item.event.label}`;
+      if (cameraDirection.dot(toTarget) > 0.82) fireEvent(item);
+      continue;
+    }
+
+    if (distance < 2.05) {
       fireEvent(item);
     }
   }
+
+  interactionPrompt.textContent = promptText || "按 E 触发";
+  interactionPrompt.classList.toggle("hidden", !promptText);
+  interactPressed = false;
 
   if (ghost?.visible) {
     ghost.lookAt(p.x, ghost.position.y, p.z);
@@ -432,7 +795,10 @@ function animate() {
   requestAnimationFrame(animate);
 }
 
-document.addEventListener("keydown", (event) => keys.add(event.code));
+document.addEventListener("keydown", (event) => {
+  keys.add(event.code);
+  if (event.code === "KeyE") interactPressed = true;
+});
 document.addEventListener("keyup", (event) => keys.delete(event.code));
 
 renderer.domElement.addEventListener("click", () => {
@@ -456,7 +822,42 @@ window.addEventListener("resize", () => {
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
-  buildWorld(input.value.trim() || DEFAULT_DREAM);
+  renderDraft(createDreamDraft(input.value.trim() || DEFAULT_DREAM));
+});
+
+directGenerateButton.addEventListener("click", () => {
+  const draft = createDreamDraft(input.value.trim() || DEFAULT_DREAM);
+  renderDraft(draft);
+  buildWorld(draft);
+  writeLog("已根据自动分镜直接生成梦境。");
+});
+
+confirmDreamButton.addEventListener("click", () => {
+  const draft = readDraftFromPanel();
+  currentDraft = draft;
+  buildWorld(draft);
+  draftPanel.classList.add("hidden");
+  writeLog("已根据确认后的分镜生成梦境。");
+});
+
+refreshDraftButton.addEventListener("click", () => {
+  renderDraft(createDreamDraft(input.value.trim() || DEFAULT_DREAM));
+});
+
+closeDraftButton.addEventListener("click", () => {
+  draftPanel.classList.add("hidden");
+});
+
+saveDreamButton.addEventListener("click", saveDreamFile);
+
+loadDreamButton.addEventListener("click", () => {
+  dreamFileInput.click();
+});
+
+dreamFileInput.addEventListener("change", () => {
+  const file = dreamFileInput.files?.[0];
+  if (file) loadDreamFile(file);
+  dreamFileInput.value = "";
 });
 
 replayButton.addEventListener("click", () => {
@@ -466,7 +867,6 @@ replayButton.addEventListener("click", () => {
 
 startButton.addEventListener("click", () => {
   overlay.style.display = "none";
-  renderer.domElement.requestPointerLock();
 });
 
 buildWorld(DEFAULT_DREAM);
