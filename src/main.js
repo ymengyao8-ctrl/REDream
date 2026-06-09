@@ -155,6 +155,7 @@ let eventCount = 0;
 let currentDraft = null;
 let pendingInteraction = null;
 let interactPressed = false;
+let propLabels = [];
 
 const palette = {
   concrete: new THREE.MeshStandardMaterial({ color: 0x77756b, roughness: 0.92, metalness: 0.05 }),
@@ -466,6 +467,7 @@ function buildDreamModel(source) {
         blackout: /停电|灯灭|断电|黑/.test(`${scene.event} ${scene.trigger}`),
         ghost: /鬼|影子|黑影|陌生人/.test(`${scene.characters} ${scene.event}`),
         triggerType: scene.triggerType,
+        scene,
       })),
     };
   }
@@ -526,6 +528,7 @@ function clearWorld() {
   }
   triggerMeshes = [];
   ghost = null;
+  propLabels = [];
 }
 
 function addBox({ size, position, material, cast = true, receive = true }) {
@@ -535,6 +538,147 @@ function addBox({ size, position, material, cast = true, receive = true }) {
   mesh.receiveShadow = receive;
   world.add(mesh);
   return mesh;
+}
+
+function addCylinder({ radius = 0.5, height = 1, position, material, radialSegments = 24 }) {
+  const mesh = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, height, radialSegments), material);
+  mesh.position.set(...position);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  world.add(mesh);
+  return mesh;
+}
+
+function recordProp(label) {
+  propLabels.push(label);
+  document.body.dataset.props = propLabels.join(",");
+}
+
+function addCharacterFigure(label, position, options = {}) {
+  recordProp(label);
+  const group = new THREE.Group();
+  const color = options.shadow ? 0x080808 : options.feminine ? 0xd9d0c4 : 0xb8c2ba;
+  const cloth = options.shadow ? palette.shadow : new THREE.MeshStandardMaterial({ color, roughness: 0.82 });
+  const accent = options.shadow ? palette.shadow : new THREE.MeshStandardMaterial({ color: options.feminine ? 0xefe7db : 0xa9c5ba, roughness: 0.74 });
+
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.28, 1.05, 8, 16), cloth);
+  body.position.y = 0.92;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 20, 14), accent);
+  head.position.y = 1.7;
+  group.add(body, head);
+
+  if (options.feminine || /女生|女人|长发/.test(label)) {
+    const hair = new THREE.Mesh(new THREE.SphereGeometry(0.25, 18, 12), new THREE.MeshStandardMaterial({ color: 0x17120f, roughness: 0.9 }));
+    hair.scale.set(1, 1.25, 0.9);
+    hair.position.y = 1.64;
+    hair.position.z = -0.03;
+    group.add(hair);
+  }
+
+  group.position.set(...position);
+  group.lookAt(0, group.position.y, 10);
+  world.add(group);
+  addTextPlane(label.slice(0, 12), [position[0], 2.45, position[2] + 0.05], options.shadow ? 0xd58b9b : 0xe9eadb);
+  return group;
+}
+
+function addElevator(position) {
+  recordProp("电梯");
+  const frameMat = new THREE.MeshStandardMaterial({ color: 0x313735, roughness: 0.58, metalness: 0.28 });
+  const doorMat = new THREE.MeshStandardMaterial({ color: 0x79807b, roughness: 0.42, metalness: 0.48 });
+  addBox({ size: [2.8, 3.0, 0.22], position, material: frameMat });
+  addBox({ size: [1.22, 2.58, 0.08], position: [position[0] - 0.63, position[1] - 0.04, position[2] + 0.16], material: doorMat });
+  addBox({ size: [1.22, 2.58, 0.08], position: [position[0] + 0.63, position[1] - 0.04, position[2] + 0.16], material: doorMat });
+  addBox({ size: [0.08, 2.5, 0.08], position: [position[0], position[1] - 0.04, position[2] + 0.22], material: palette.darkConcrete });
+  addBox({ size: [0.34, 0.52, 0.08], position: [position[0] + 1.78, position[1] + 0.16, position[2] + 0.22], material: palette.greenGlow });
+  addTextPlane("电梯", [position[0], position[1] + 1.88, position[2] + 0.35], 0x89d6a3);
+}
+
+function addBed(position) {
+  recordProp("床");
+  const bedMat = new THREE.MeshStandardMaterial({ color: 0xb8b2a4, roughness: 0.86 });
+  const sheetMat = new THREE.MeshStandardMaterial({ color: 0xd9d8d0, roughness: 0.92 });
+  addBox({ size: [2.7, 0.45, 1.45], position: [position[0], position[1] - 0.47, position[2]], material: bedMat });
+  addBox({ size: [2.5, 0.18, 1.28], position: [position[0], position[1] - 0.14, position[2]], material: sheetMat });
+  addBox({ size: [0.62, 0.16, 1.0], position: [position[0] - 0.82, position[1] + 0.06, position[2]], material: palette.paper });
+  addTextPlane("床", [position[0], position[1] + 1.15, position[2] - 0.1], 0xe9eadb);
+}
+
+function addPhone(position) {
+  recordProp("手机");
+  const phoneMat = new THREE.MeshStandardMaterial({ color: 0x111414, roughness: 0.35, metalness: 0.2 });
+  const screenMat = new THREE.MeshStandardMaterial({ color: 0x161b22, emissive: 0x0b1824, roughness: 0.2 });
+  addBox({ size: [0.46, 0.08, 0.76], position, material: phoneMat });
+  addBox({ size: [0.38, 0.03, 0.62], position: [position[0], position[1] + 0.06, position[2]], material: screenMat });
+  addTextPlane("手机打不开", [position[0], position[1] + 0.86, position[2]], 0x7fc5d8);
+}
+
+function addMirror(position) {
+  recordProp("镜子");
+  const frameMat = new THREE.MeshStandardMaterial({ color: 0x28231f, roughness: 0.7 });
+  const glassMat = new THREE.MeshStandardMaterial({ color: 0x8ea0a0, roughness: 0.18, metalness: 0.36, emissive: 0x091011 });
+  addBox({ size: [1.45, 2.0, 0.16], position, material: frameMat });
+  addBox({ size: [1.18, 1.72, 0.08], position: [position[0], position[1], position[2] + 0.08], material: glassMat });
+  addTextPlane("镜子", [position[0], position[1] + 1.35, position[2] + 0.16], 0x7fc5d8);
+}
+
+function addSceneProps(event, index) {
+  const sceneData = event.scene;
+  if (!sceneData) return;
+
+  const text = [sceneData.location, sceneData.characters, sceneData.event, sceneData.trigger, sceneData.dialogue].join(" ");
+  const xSide = event.position.x < 0 ? -1 : 1;
+  const baseZ = event.position.z;
+  const wallX = xSide * 6.9;
+
+  addTextPlane(sceneData.location.slice(0, 18), [event.position.x, 2.55, baseZ + 0.55], event.color);
+
+  if (/电梯/.test(text)) {
+    addElevator([wallX, 1.52, baseZ - 0.55]);
+  }
+
+  if (/床|躺|床上|被子|枕/.test(text)) {
+    addBed([event.position.x * 0.72, 0.55, baseZ + 1.35]);
+  }
+
+  if (/女生|女人|长发/.test(text)) {
+    addCharacterFigure("女生", [event.position.x * 0.72, 0, baseZ - 1.15], { feminine: true });
+  }
+
+  if (/男生|男人|老师|护士|白衣人|朋友|妈妈|爸爸/.test(text)) {
+    const label = (text.match(/男生|男人|老师|护士|白衣人|朋友|妈妈|爸爸/) || ["梦里的人"])[0];
+    addCharacterFigure(label, [event.position.x * 0.65, 0, baseZ - 1.0], { feminine: /妈妈|护士/.test(label) });
+  }
+
+  if (/鬼|黑影|影子|长发女/.test(text)) {
+    addCharacterFigure(/长发女/.test(text) ? "长发黑影" : "黑影", [event.position.x * 0.3, 0, baseZ - 2.1], { shadow: true, feminine: /长发女/.test(text) });
+  }
+
+  if (/手机/.test(text)) {
+    addPhone([event.position.x * 0.62, 0.82, baseZ + 0.72]);
+  }
+
+  if (/镜子|镜头/.test(text)) {
+    addMirror([-wallX, 1.42, baseZ - 0.25]);
+  }
+
+  if (/门口|门/.test(text) && !/电梯/.test(text)) {
+    recordProp("门");
+    addBox({ size: [1.6, 2.55, 0.18], position: [wallX, 1.28, baseZ - 0.3], material: palette.amber });
+    addTextPlane("门", [wallX, 2.6, baseZ - 0.08], 0xd6b36b);
+  }
+
+  if (/闪电|亮缝|亮|光/.test(text)) {
+    recordProp("亮缝");
+    const light = new THREE.PointLight(0x7fc5d8, 1.8, 7);
+    light.position.set(event.position.x * 0.45, 2.15, baseZ + 0.9);
+    world.add(light);
+    addBox({ size: [0.08, 1.55, 0.08], position: [event.position.x * 0.45, 1.2, baseZ + 0.9], material: palette.greenGlow });
+  }
+
+  if (index > 0) {
+    addBox({ size: [5.6, 0.04, 0.08], position: [0, 0.04, baseZ + 3.9], material: new THREE.MeshStandardMaterial({ color: event.color, emissive: event.color, transparent: true, opacity: 0.34 }) });
+  }
 }
 
 function addMarker(event) {
@@ -656,7 +800,10 @@ function buildWorld(source) {
   ghost.visible = false;
   world.add(ghost);
 
-  dreamModel.events.forEach(addMarker);
+  dreamModel.events.forEach((event, index) => {
+    addSceneProps(event, index);
+    addMarker(event);
+  });
   resetPlayer();
   writeLog("新的梦境已经生成。");
 }
@@ -870,9 +1017,26 @@ startButton.addEventListener("click", () => {
 });
 
 buildWorld(DEFAULT_DREAM);
+const dreamParam = new URLSearchParams(window.location.search).get("dream");
+if (dreamParam) {
+  const draft = createDreamDraft(dreamParam);
+  currentDraft = draft;
+  input.value = dreamParam;
+  renderDraft(draft);
+  buildWorld(draft);
+}
 window.__dreamDebug = {
   getPosition: () => ({ x: yaw.position.x, y: yaw.position.y, z: yaw.position.z }),
   getTriggeredCount: () => eventCount,
   getCanvasCount: () => document.querySelectorAll("canvas").length,
+  getObjectCount: () => world.children.length,
+  getPropLabels: () => [...propLabels],
+  generateFromText: (text) => {
+    const draft = createDreamDraft(text || DEFAULT_DREAM);
+    currentDraft = draft;
+    renderDraft(draft);
+    buildWorld(draft);
+    return { scenes: draft.scenes.length, props: [...propLabels], title: draft.title };
+  },
 };
 animate();
