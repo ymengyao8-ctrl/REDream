@@ -421,6 +421,29 @@ function syncDraftFromPanel({ regenerateStory = false } = {}) {
   return draft;
 }
 
+function extractQuotedDialogue(text) {
+  const matches = [...String(text).matchAll(/[“"]([^”"]{1,120})[”"]/g)].map((match) => match[1].trim());
+  return matches.at(-1) || "";
+}
+
+function syncPanelFromStory() {
+  if (draftPanel.classList.contains("hidden") || !storyboard.children.length) return currentDraft;
+  const paragraphs = storyOutput.value
+    .split(/\n\s*\n/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const cards = [...storyboard.querySelectorAll(".scene-card")];
+
+  cards.forEach((card, index) => {
+    const paragraph = paragraphs[index] || (cards.length === 1 ? storyOutput.value : "");
+    const dialogue = extractQuotedDialogue(paragraph);
+    const dialogueInput = card.querySelector('[data-field="dialogue"]');
+    if (dialogue && dialogueInput) dialogueInput.value = dialogue;
+  });
+
+  return syncDraftFromPanel();
+}
+
 function getEditableDraft() {
   if (!draftPanel.classList.contains("hidden") && storyboard.children.length) {
     return readDraftFromPanel();
@@ -1005,6 +1028,7 @@ form.addEventListener("submit", (event) => {
 directGenerateButton.addEventListener("click", () => {
   const raw = input.value.trim() || DEFAULT_DREAM;
   const usesCurrentDraft = currentDraft && raw === lastParsedRaw;
+  if (usesCurrentDraft) syncPanelFromStory();
   const draft = usesCurrentDraft ? syncDraftFromPanel() || currentDraft : createDreamDraft(raw);
   renderDraft(draft);
   buildWorld(draft);
@@ -1012,6 +1036,7 @@ directGenerateButton.addEventListener("click", () => {
 });
 
 confirmDreamButton.addEventListener("click", () => {
+  syncPanelFromStory();
   const draft = syncDraftFromPanel() || readDraftFromPanel();
   currentDraft = draft;
   buildWorld(draft);
@@ -1049,7 +1074,11 @@ storyboard.addEventListener("change", () => {
 });
 
 storyOutput.addEventListener("input", () => {
-  syncDraftFromPanel();
+  syncPanelFromStory();
+});
+
+storyOutput.addEventListener("change", () => {
+  syncPanelFromStory();
 });
 
 replayButton.addEventListener("click", () => {
