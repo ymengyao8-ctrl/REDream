@@ -54,7 +54,7 @@ app.innerHTML = `
         <div class="storyboard" id="storyboard"></div>
         <div class="button-row">
           <button class="primary" type="button" id="confirm-dream">确认并生成可回放梦境</button>
-          <button type="button" id="refresh-draft">重新解析</button>
+          <button type="button" id="refresh-draft">从原文重新解析</button>
           <button type="button" id="save-dream">保存 .redream</button>
           <button type="button" id="load-dream">导入 .redream</button>
         </div>
@@ -156,6 +156,7 @@ let currentDraft = null;
 let pendingInteraction = null;
 let interactPressed = false;
 let propLabels = [];
+let lastParsedRaw = "";
 
 const palette = {
   concrete: new THREE.MeshStandardMaterial({ color: 0x77756b, roughness: 0.92, metalness: 0.05 }),
@@ -332,6 +333,7 @@ function polishDreamStory(scenes) {
 
 function renderDraft(draft) {
   currentDraft = draft;
+  lastParsedRaw = draft.raw || input.value.trim() || DEFAULT_DREAM;
   storyOutput.value = draft.story;
   storyboard.innerHTML = draft.scenes
     .map(
@@ -359,6 +361,15 @@ function renderDraft(draft) {
     )
     .join("");
   draftPanel.classList.remove("hidden");
+}
+
+function updateSceneBadges() {
+  [...storyboard.querySelectorAll(".scene-card")].forEach((card) => {
+    const type = card.querySelector('[data-field="triggerType"]')?.value || "location";
+    const badge = card.querySelector(".scene-card-head span");
+    if (!badge) return;
+    badge.textContent = type === "interaction" ? "交互触发" : type === "gaze" ? "注视触发" : "位置触发";
+  });
 }
 
 function escapeHtml(value) {
@@ -395,6 +406,19 @@ function readDraftFromPanel() {
     story: storyOutput.value.trim() || polishDreamStory(scenes),
     scenes,
   };
+}
+
+function syncDraftFromPanel({ regenerateStory = false } = {}) {
+  if (draftPanel.classList.contains("hidden") || !storyboard.children.length) return currentDraft;
+  const draft = readDraftFromPanel();
+  if (regenerateStory) {
+    draft.story = polishDreamStory(draft.scenes);
+    storyOutput.value = draft.story;
+  }
+  currentDraft = draft;
+  lastParsedRaw = draft.raw;
+  updateSceneBadges();
+  return draft;
 }
 
 function getEditableDraft() {
@@ -969,18 +993,26 @@ window.addEventListener("resize", () => {
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
-  renderDraft(createDreamDraft(input.value.trim() || DEFAULT_DREAM));
+  const raw = input.value.trim() || DEFAULT_DREAM;
+  if (currentDraft && raw === lastParsedRaw) {
+    renderDraft(syncDraftFromPanel() || currentDraft);
+    writeLog("已打开当前分镜草稿。");
+    return;
+  }
+  renderDraft(createDreamDraft(raw));
 });
 
 directGenerateButton.addEventListener("click", () => {
-  const draft = createDreamDraft(input.value.trim() || DEFAULT_DREAM);
+  const raw = input.value.trim() || DEFAULT_DREAM;
+  const usesCurrentDraft = currentDraft && raw === lastParsedRaw;
+  const draft = usesCurrentDraft ? syncDraftFromPanel() || currentDraft : createDreamDraft(raw);
   renderDraft(draft);
   buildWorld(draft);
-  writeLog("已根据自动分镜直接生成梦境。");
+  writeLog(usesCurrentDraft ? "已根据当前分镜直接生成梦境。" : "已根据自动分镜直接生成梦境。");
 });
 
 confirmDreamButton.addEventListener("click", () => {
-  const draft = readDraftFromPanel();
+  const draft = syncDraftFromPanel() || readDraftFromPanel();
   currentDraft = draft;
   buildWorld(draft);
   draftPanel.classList.add("hidden");
@@ -989,6 +1021,7 @@ confirmDreamButton.addEventListener("click", () => {
 
 refreshDraftButton.addEventListener("click", () => {
   renderDraft(createDreamDraft(input.value.trim() || DEFAULT_DREAM));
+  writeLog("已从原始梦境文本重新解析。");
 });
 
 closeDraftButton.addEventListener("click", () => {
@@ -1005,6 +1038,18 @@ dreamFileInput.addEventListener("change", () => {
   const file = dreamFileInput.files?.[0];
   if (file) loadDreamFile(file);
   dreamFileInput.value = "";
+});
+
+storyboard.addEventListener("input", () => {
+  syncDraftFromPanel({ regenerateStory: true });
+});
+
+storyboard.addEventListener("change", () => {
+  syncDraftFromPanel({ regenerateStory: true });
+});
+
+storyOutput.addEventListener("input", () => {
+  syncDraftFromPanel();
 });
 
 replayButton.addEventListener("click", () => {
