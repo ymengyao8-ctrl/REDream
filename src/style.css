@@ -220,6 +220,7 @@ h1 {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  align-items: center;
 }
 
 .swatch {
@@ -236,6 +237,24 @@ h1 {
 .swatch.selected {
   border-color: #f7faf5;
   box-shadow: 0 0 0 3px rgba(137, 214, 163, 0.24);
+}
+
+.custom-tone {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: auto;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.custom-tone input {
+  width: 46px;
+  min-width: 46px;
+  height: 34px;
+  min-height: 34px;
+  padding: 2px;
+  border-radius: 8px;
 }
 
 .mood-chips button {

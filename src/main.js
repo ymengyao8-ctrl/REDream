@@ -45,6 +45,7 @@ app.innerHTML = `
               <button type="button" class="swatch" data-color="#a7a7ad" style="--swatch:#a7a7ad" aria-label="灰色"></button>
               <button type="button" class="swatch" data-color="#111217" style="--swatch:#111217" aria-label="黑色"></button>
             </div>
+            <label class="custom-tone">自选 <input id="custom-tone" type="color" value="#f4a7c5" /></label>
           </div>
           <div class="style-group">
             <span>关键词</span>
@@ -93,6 +94,7 @@ app.innerHTML = `
       <div class="play-dock" id="play-dock">
         <button type="button" id="open-compose">文本</button>
         <button type="button" id="open-draft">分镜</button>
+        <button type="button" id="transform-scene">变换</button>
         <button type="button" id="toggle-log" aria-label="打开记录">＋</button>
         <div class="log-popover hidden" id="log-popover">
           <div class="event-log" id="event-log">
@@ -145,6 +147,8 @@ const toggleLogButton = document.querySelector("#toggle-log");
 const logPopover = document.querySelector("#log-popover");
 const toneSwatches = document.querySelector("#tone-swatches");
 const moodChips = document.querySelector("#mood-chips");
+const customToneInput = document.querySelector("#custom-tone");
+const transformSceneButton = document.querySelector("#transform-scene");
 
 input.value = DEFAULT_DREAM;
 
@@ -165,7 +169,8 @@ function isEditingText(target = document.activeElement) {
 }
 
 function getStyleProfile() {
-  const colors = [...toneSwatches.querySelectorAll(".swatch.selected")].map((button) => button.dataset.color);
+  const presetColors = [...toneSwatches.querySelectorAll(".swatch.selected")].map((button) => button.dataset.color);
+  const colors = [customToneInput.value, ...presetColors].filter(Boolean);
   const moods = [...moodChips.querySelectorAll(".selected")].map((button) => button.dataset.mood);
   return {
     palette: colors.length ? colors : ["#a7a7ad"],
@@ -174,6 +179,7 @@ function getStyleProfile() {
 }
 
 function applyStyleProfile(profile = getStyleProfile()) {
+  customToneInput.value = profile.palette?.[0] || "#f4a7c5";
   toneSwatches.querySelectorAll(".swatch").forEach((button) => {
     button.classList.toggle("selected", profile.palette?.includes(button.dataset.color));
   });
@@ -226,6 +232,7 @@ let pendingInteraction = null;
 let interactPressed = false;
 let propLabels = [];
 let lastParsedRaw = "";
+let activeEventIndex = 0;
 
 const palette = {
   concrete: new THREE.MeshStandardMaterial({ color: 0x77756b, roughness: 0.92, metalness: 0.05 }),
@@ -277,13 +284,21 @@ function compactText(text) {
 }
 
 function splitSentences(text) {
-  const normalized = text.replace(/(然后|后来|接着|突然|之后|镜头一转|停电后|灯灭后|断电后)/g, "\n$1");
-  return normalized
+  const normalized = text.replace(/(镜头一转|停电后|灯灭后|断电后|突然变成|然后|后来|接着|突然|之后|变成|变换)/g, "\n$1");
+  const parts = normalized
     .replace(/\r/g, "")
     .split(/(?<=[。！？!?])|\n+/)
     .map((part) => compactText(part))
-    .filter((part) => !/^(然后|后来|接着|突然|之后)$/.test(part))
+    .filter((part) => !/^(然后|后来|接着|之后)$/.test(part))
     .filter(Boolean);
+  return parts.reduce((acc, part) => {
+    const previous = acc.at(-1) || "";
+    if (/^突然变成/.test(part) && /[它他她]$/.test(previous)) {
+      acc[acc.length - 1] = previous.slice(0, -1).trim();
+      return [...acc, `${previous.at(-1)}${part}`];
+    }
+    return [...acc, part];
+  }, []);
 }
 
 function splitIntoSceneTexts(text) {
@@ -292,7 +307,7 @@ function splitIntoSceneTexts(text) {
 
   const scenes = [];
   let current = [];
-  const hardShift = /然后|后来|接着|突然|之后|走到|来到|到了|进入|停电|灯灭|触发|醒来|看见|遇到|发现|左边|右边|旁边|出现|说|有个|一个/;
+  const hardShift = /然后|后来|接着|突然|之后|突然变成|变成|变换|镜头一转|走到|来到|到了|进入|停电|灯灭|触发|醒来|看见|遇到|发现|左边|右边|旁边|出现|说|有个|一个/;
 
   for (const sentence of sentences) {
     if (current.length && hardShift.test(sentence)) {
@@ -322,11 +337,14 @@ function inferLocation(text, index) {
 
 function inferCharacters(text) {
   const matches = pickMatches(text, PERSON_WORDS);
+  if (/我妈|母亲/.test(text)) matches.push("妈妈");
   if (/我|自己|主人公/.test(text)) matches.unshift("主人公");
   return [...new Set(matches)].slice(0, 4).join("、") || "主人公";
 }
 
 function inferMood(text) {
+  if (/甜蜜|糖果|粉色|喜欢|温柔/.test(text)) return "甜蜜";
+  if (/暧昧|心动|靠近|亲密/.test(text)) return "暧昧";
   if (/开心|高兴|放松|温暖|安心/.test(text)) return "高兴的";
   if (/害怕|恐怖|鬼|黑影|压抑|窒息|追|逃/.test(text)) return "压抑、紧张";
   if (/神圣|庙|神龛|祭坛|光|圣/.test(text)) return "神圣又不安";
@@ -351,8 +369,8 @@ function inferTriggerType(trigger, text) {
 }
 
 function inferEvent(text, location) {
-  const trimmed = compactText(text).replace(/[。！？!?]$/, "");
-  if (trimmed.length > 8) return trimmed.slice(0, 90);
+  const trimmed = compactText(text).replace(/[。！？!?，,、；;]+$/, "");
+  if (trimmed.length > 4) return trimmed.slice(0, 90);
   return `主人公来到${location}，梦境开始改变`;
 }
 
@@ -366,6 +384,8 @@ function inferDialogue(text) {
 }
 
 function inferEnvironment(text) {
+  if (/大海|海边|沙滩|海鸥|蓝天|白云|海浪|海面/.test(text)) return "ocean";
+  if (/糖果屋|糖果|彩虹|甜蜜|粉色/.test(text)) return "candy";
   if (/宫殿|王国|骑士|水池|城堡|花园/.test(text)) return "palace";
   if (/电梯|公寓|楼道/.test(text)) return "elevator";
   if (/卧室|床|躺|枕头|被子|手机/.test(text)) return "bedroom";
@@ -375,6 +395,8 @@ function inferEnvironment(text) {
 }
 
 function inferSpaceType(text) {
+  if (/大海|海边|沙滩|海鸥|蓝天|白云|海浪|海面/.test(text)) return "ocean_beach";
+  if (/糖果屋|糖果|彩虹|甜蜜|粉色/.test(text)) return "candy_house";
   if (/宫殿|王国|骑士|水池|城堡|花园/.test(text)) return "pool_hall";
   if (/电梯|公寓|楼道/.test(text)) return "elevator_lobby";
   if (/卧室|床|躺|枕头|被子|手机/.test(text)) return "bedroom";
@@ -387,6 +409,8 @@ function inferSpaceType(text) {
 function environmentFromSpaceType(type) {
   return {
     pool_hall: "palace",
+    ocean_beach: "ocean",
+    candy_house: "candy",
     bedroom: "bedroom",
     elevator_lobby: "elevator",
     classroom: "classroom",
@@ -402,10 +426,13 @@ function inferObjects(text) {
     ["shadow", /鬼|黑影|影子|长发女/],
     ["bed", /床|躺|床上|被子|枕/],
     ["phone", /手机/],
-    ["mirror", /镜子|镜头/],
+    ["mirror", /镜子|镜面|照镜/],
     ["elevator", /电梯/],
     ["door", /门口|门/],
     ["water_pool", /水池|水|湖|海/],
+    ["sea_gull", /海鸥/],
+    ["cloud", /白云|云/],
+    ["candy", /糖果|糖果屋|彩虹/],
     ["teacher", /老师/],
     ["desk", /讲台|课桌|卷子/],
     ["shrine", /神龛|庙|祭坛|香/],
@@ -417,7 +444,7 @@ function inferObjects(text) {
 function createScenePlan(draft) {
   const sourceText = [draft.raw, draft.story, ...draft.scenes.flatMap((scene) => [scene.location, scene.characters, scene.event, scene.mood, scene.trigger, scene.dialogue])].join(" ");
   const spaces = draft.scenes.map((scene, index) => {
-    const text = [scene.location, scene.characters, scene.event, scene.mood, scene.trigger, scene.dialogue].join(" ");
+    const text = [scene.source, scene.location, scene.characters, scene.event, scene.mood, scene.trigger, scene.dialogue].join(" ");
     return {
       id: scene.id,
       name: scene.location,
@@ -425,11 +452,12 @@ function createScenePlan(draft) {
       size: index === 0 ? "medium" : "small",
       style: /宫殿|王国|骑士|神圣/.test(text) ? "palace" : inferEnvironment(text),
       mood: scene.mood,
-      connectedBy: index === 0 ? "start" : /停电|灯灭|断电|黑/.test(text) ? "blackout_jump" : "dream_cut",
+      connectedBy: index === 0 ? "start" : /变成|变换/.test(text) ? "morph" : /停电|灯灭|断电|黑/.test(text) ? "blackout_jump" : "dream_cut",
       objects: inferObjects(text),
     };
   });
-  const globalEnvironment = spaces[0]?.style && spaces[0].style !== "corridor" ? spaces[0].style : environmentFromSpaceType(spaces[0]?.type) || inferEnvironment(sourceText);
+  const strongestSpace = spaces.find((space) => environmentFromSpaceType(space.type) !== "corridor" || space.style !== "corridor") || spaces[0];
+  const globalEnvironment = strongestSpace?.style && strongestSpace.style !== "corridor" ? strongestSpace.style : environmentFromSpaceType(strongestSpace?.type) || inferEnvironment(sourceText);
 
   return {
     version: 1,
@@ -490,6 +518,53 @@ function withScenePlan(draft) {
   return nextDraft;
 }
 
+function describeColorToken(value) {
+  const named = {
+    "#f4a7c5": "柔粉色",
+    "#f2d36b": "暖黄色",
+    "#8fd3ff": "天蓝色",
+    "#8bd99e": "薄荷绿",
+    "#a7a7ad": "雾灰色",
+    "#111217": "近黑色",
+  };
+  const key = String(value || "").toLowerCase();
+  if (named[key]) return named[key];
+  const match = key.match(/^#?([0-9a-f]{6})$/i);
+  if (!match) return "自选色";
+  const number = Number.parseInt(match[1], 16);
+  const r = (number >> 16) & 255;
+  const g = (number >> 8) & 255;
+  const b = number & 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  if (max < 48) return "深色";
+  if (max - min < 24) return max > 190 ? "白色" : "灰色";
+  if (b > r + 30 && b > g + 10) return "蓝色";
+  if (g > r + 20 && g > b + 10) return "绿色";
+  if (r > 200 && g > 150 && b < 120) return "黄色";
+  if (r > 190 && b > 150) return "粉紫色";
+  if (r > g && r > b) return "暖红色";
+  return "自选色";
+}
+
+function mergeSceneMood(styleProfile, scenes) {
+  const sceneMoodText = scenes.map((scene) => `${scene.mood} ${scene.event} ${scene.source}`).join(" ");
+  const inferred = [
+    [/甜蜜|糖果|粉色|温柔/, "甜蜜"],
+    [/暧昧|心动|亲密/, "暧昧"],
+    [/害怕|恐怖|压抑|鬼|黑影/, "恐惧"],
+    [/悬疑|谜|线索/, "悬疑"],
+    [/激动|兴奋|奔跑/, "激动"],
+    [/神圣|庙|神龛|祭坛/, "神圣"],
+  ]
+    .filter(([pattern]) => pattern.test(sceneMoodText))
+    .map(([, mood]) => mood);
+  return {
+    ...styleProfile,
+    moods: [...new Set([...inferred, ...(styleProfile.moods || [])])],
+  };
+}
+
 function getStyleLanguage(styleProfile = getStyleProfile()) {
   const moods = styleProfile.moods || [];
   if (moods.includes("甜蜜")) return { texture: "柔软、明亮，像糖纸在光里慢慢展开", verb: "轻轻靠近", order: "被一种温柔的期待推着往前" };
@@ -502,8 +577,9 @@ function getStyleLanguage(styleProfile = getStyleProfile()) {
 }
 
 function polishDreamStory(scenes, styleProfile = getStyleProfile()) {
-  const language = getStyleLanguage(styleProfile);
-  const colorLine = styleProfile.palette?.length ? `整个梦被${styleProfile.palette.join("、")}这样的色调罩着，` : "";
+  const effectiveStyle = mergeSceneMood(styleProfile, scenes);
+  const language = getStyleLanguage(effectiveStyle);
+  const colorLine = effectiveStyle.palette?.length ? `整个梦被${effectiveStyle.palette.map(describeColorToken).join("、")}罩着，` : "";
   return scenes
     .map((scene, index) => {
       const lead = index === 0 ? "梦一开始" : index === scenes.length - 1 ? "到最后" : "后来";
@@ -864,6 +940,32 @@ function addMirror(position) {
   addTextPlane("镜子", [position[0], position[1] + 1.35, position[2] + 0.16], 0x7fc5d8);
 }
 
+function addCloud(position, scale = 1) {
+  recordProp("白云");
+  const cloudMat = new THREE.MeshStandardMaterial({ color: 0xf8fbff, roughness: 0.9 });
+  for (const [x, y, z, r] of [[0, 0, 0, 0.7], [0.65, 0.05, 0.05, 0.52], [-0.62, -0.02, 0.02, 0.48], [0.1, 0.25, -0.08, 0.55]]) {
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(r * scale, 18, 12), cloudMat);
+    mesh.position.set(position[0] + x * scale, position[1] + y * scale, position[2] + z * scale);
+    world.add(mesh);
+  }
+}
+
+function addSeaGull(position) {
+  recordProp("海鸥");
+  const mat = new THREE.MeshStandardMaterial({ color: 0xf5f5ef, roughness: 0.65 });
+  addBox({ size: [0.42, 0.12, 0.16], position, material: mat });
+  addBox({ size: [0.72, 0.035, 0.12], position: [position[0] - 0.38, position[1] + 0.04, position[2]], material: mat });
+  addBox({ size: [0.72, 0.035, 0.12], position: [position[0] + 0.38, position[1] + 0.04, position[2]], material: mat });
+  addTextPlane("海鸥", [position[0], position[1] + 0.7, position[2]], 0xffffff);
+}
+
+function addCandy(position, color = 0xf4a7c5) {
+  recordProp("糖果");
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.48 });
+  addCylinder({ radius: 0.45, height: 1.1, position, material: mat, radialSegments: 32 });
+  addBox({ size: [1.2, 0.08, 0.08], position: [position[0], position[1] + 0.62, position[2]], material: palette.paper });
+}
+
 function addSceneProps(event, index) {
   const sceneData = event.scene;
   if (!sceneData) return;
@@ -900,8 +1002,20 @@ function addSceneProps(event, index) {
     addPhone([event.position.x * 0.62, 0.82, baseZ + 0.72]);
   }
 
-  if (/镜子|镜头/.test(text)) {
+  if (/镜子|镜面|照镜/.test(text)) {
     addMirror([-wallX, 1.42, baseZ - 0.25]);
+  }
+
+  if (/海鸥/.test(text)) {
+    addSeaGull([event.position.x * 0.7, 2.2, baseZ - 1.2]);
+  }
+
+  if (/白云|云/.test(text)) {
+    addCloud([event.position.x * 0.35, 3.2, baseZ - 1.8], 0.75);
+  }
+
+  if (/糖果|糖果屋|彩虹/.test(text)) {
+    addCandy([event.position.x * 0.6, 0.65, baseZ - 0.8], event.color);
   }
 
   if (/门口|门/.test(text) && !/电梯/.test(text)) {
@@ -987,6 +1101,8 @@ function isBrightProfile(styleProfile) {
 function applyAtmosphere(environment, features, styleProfile = getStyleProfile()) {
   const primary = styleProfile.palette?.[0] || "#89d6a3";
   const settings = {
+    ocean: { background: 0x8fd3ff, fog: 0.006, hemi: 0xffffff },
+    candy: { background: 0xf8c3df, fog: 0.012, hemi: 0xfff3f7 },
     palace: { background: 0x13201a, fog: 0.025, hemi: 0xe7d6a2 },
     bedroom: { background: 0x10100f, fog: 0.035, hemi: 0xc8b8a0 },
     classroom: { background: 0x101412, fog: 0.03, hemi: 0xcbd6ca },
@@ -995,7 +1111,7 @@ function applyAtmosphere(environment, features, styleProfile = getStyleProfile()
     corridor: { background: 0x070909, fog: 0.04, hemi: 0xb8d3ca },
   }[environment] || { background: 0x070909, fog: 0.04, hemi: 0xb8d3ca };
 
-  const background = features.hasBlackout ? tintColor(primary, 0.12) : tintColor(primary, isBrightProfile(styleProfile) ? 0.42 : 0.22);
+  const background = environment === "ocean" ? 0x8fd3ff : environment === "candy" ? tintColor(primary, 0.78) : features.hasBlackout ? tintColor(primary, 0.12) : tintColor(primary, isBrightProfile(styleProfile) ? 0.42 : 0.22);
   scene.background = new THREE.Color(background || settings.background);
   scene.fog = new THREE.FogExp2(background || settings.background, features.hasBlackout ? settings.fog + 0.018 : isBrightProfile(styleProfile) ? Math.max(settings.fog - 0.012, 0.012) : settings.fog);
   return {
@@ -1005,11 +1121,48 @@ function applyAtmosphere(environment, features, styleProfile = getStyleProfile()
   };
 }
 
-function addBaseSkeleton(environment) {
-  const wallMat = environment === "palace" ? new THREE.MeshStandardMaterial({ color: 0x7f7359, roughness: 0.82 }) : palette.concrete;
-  const floorMat = environment === "palace" ? new THREE.MeshStandardMaterial({ color: 0x4a4f3f, roughness: 0.72 }) : palette.darkConcrete;
+function addBaseSkeleton(environment, styleProfile = getStyleProfile()) {
+  const primary = styleProfile.palette?.[0] || "#89d6a3";
+  const bright = isBrightProfile(styleProfile) || environment === "ocean" || environment === "candy";
+  const wallColor = environment === "palace" ? 0x7f7359 : bright ? tintColor(primary, 0.86) : 0x77756b;
+  const floorColor = environment === "palace" ? 0x4a4f3f : bright ? tintColor(primary, 0.52) : 0x2a2e2b;
+  const wallMat = new THREE.MeshStandardMaterial({ color: wallColor, roughness: 0.78 });
+  const floorMat = new THREE.MeshStandardMaterial({ color: floorColor, roughness: 0.82 });
 
   addBox({ size: [15, 0.22, 74], position: [0, -0.1, -14], material: floorMat, cast: false });
+
+  if (environment === "ocean") {
+    scene.background = new THREE.Color(0x8fd3ff);
+    const sandMat = new THREE.MeshStandardMaterial({ color: 0xf0dca8, roughness: 0.92 });
+    const oceanMat = new THREE.MeshPhysicalMaterial({ color: 0x1e91d6, roughness: 0.18, metalness: 0, transparent: true, opacity: 0.82 });
+    addBox({ size: [80, 0.18, 34], position: [0, -0.08, 4], material: sandMat, cast: false });
+    addBox({ size: [90, 0.08, 80], position: [0, 0.02, -30], material: oceanMat, cast: false });
+    addBox({ size: [90, 0.06, 0.18], position: [0, 0.12, -4.5], material: new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.8 }), cast: false });
+    addCloud([-4.6, 6.0, -16], 1.05);
+    addCloud([4.8, 5.4, -22], 0.85);
+    addTextPlane("蓝天 白云 大海", [0, 3.2, 1.5], 0xffffff);
+    return;
+  }
+
+  if (environment === "candy") {
+    const candyFloor = new THREE.MeshStandardMaterial({ color: tintColor(primary, 1.05), roughness: 0.6 });
+    addBox({ size: [28, 0.2, 44], position: [0, -0.04, -10], material: candyFloor, cast: false });
+    for (let i = 0; i < 14; i += 1) {
+      const x = -8 + (i % 7) * 2.6;
+      const z = -24 + Math.floor(i / 7) * 9;
+      addCandy([x, 0.72, z], [0xf4a7c5, 0xf2d36b, 0x8fd3ff, 0x8bd99e][i % 4]);
+    }
+    for (let i = 0; i < 5; i += 1) {
+      const hill = new THREE.Mesh(new THREE.SphereGeometry(2.2 + i * 0.2, 24, 14), new THREE.MeshStandardMaterial({ color: [0xffb3d6, 0xffe48f, 0xa8e6ff, 0xb7f4c8, 0xffc4a3][i], roughness: 0.65 }));
+      hill.position.set(-7 + i * 3.5, 0.0, -18 - i * 1.8);
+      hill.scale.y = 0.45;
+      world.add(hill);
+    }
+    addCloud([-4.5, 5.2, -18], 0.8);
+    addCloud([5.0, 5.8, -24], 0.7);
+    addTextPlane("糖果屋", [0, 3.1, 3], 0xffffff);
+    return;
+  }
 
   if (environment === "palace") {
     addBox({ size: [22, 0.2, 48], position: [0, -0.02, -13], material: floorMat, cast: false });
@@ -1055,7 +1208,7 @@ function addBaseSkeleton(environment) {
   }
 
   const isElevator = environment === "elevator";
-  addBox({ size: [15, 0.26, 74], position: [0, 4.2, -14], material: palette.darkConcrete, cast: false });
+  addBox({ size: [15, 0.26, 74], position: [0, 4.2, -14], material: bright ? wallMat : palette.darkConcrete, cast: false });
   addBox({ size: [0.24, 4.5, 74], position: [-7.5, 2, -14], material: wallMat, cast: false });
   addBox({ size: [0.24, 4.5, 74], position: [7.5, 2, -14], material: wallMat, cast: false });
 
@@ -1091,7 +1244,7 @@ function buildWorld(source) {
   keyLight.shadow.mapSize.set(2048, 2048);
   world.add(keyLight);
 
-  addBaseSkeleton(dreamModel.environment);
+  addBaseSkeleton(dreamModel.environment, dreamModel.plan?.styleProfile || dreamModel.styleProfile);
 
   if (dreamModel.features.hasHospital) {
     for (let i = 0; i < 8; i += 1) {
@@ -1145,23 +1298,6 @@ function buildWorld(source) {
   writeLog("新的梦境已经生成。");
 }
 
-function resetPlayer() {
-  yaw.position.set(0, 1.68, 10);
-  eventCount = 0;
-  yawAngle = 0;
-  pitchAngle = 0;
-  yaw.rotation.y = yawAngle;
-  pitch.rotation.x = pitchAngle;
-  velocity.set(0, 0, 0);
-  triggerMeshes.forEach((item) => {
-    item.triggered = false;
-    item.base.material.opacity = 0.42;
-  });
-  blackout.classList.remove("active");
-  if (ghost) ghost.visible = false;
-  dialogue.classList.add("hidden");
-}
-
 function writeLog(text) {
   const node = document.createElement("div");
   node.className = "entry";
@@ -1193,6 +1329,38 @@ function fireEvent(item) {
     ghost.visible = true;
     ghost.position.z = -25;
   }
+}
+
+function transformToNextScene() {
+  if (!triggerMeshes.length) return;
+  activeEventIndex = (activeEventIndex + 1) % triggerMeshes.length;
+  const target = triggerMeshes[activeEventIndex].event.position;
+  yaw.position.set(THREE.MathUtils.clamp(target.x * 0.6, -5.8, 5.8), 1.68, THREE.MathUtils.clamp(target.z + 2.6, -39, 10));
+  yawAngle = 0;
+  pitchAngle = 0;
+  yaw.rotation.y = yawAngle;
+  pitch.rotation.x = pitchAngle;
+  blackout.classList.add("active");
+  blackoutTimer = 0.85;
+  writeLog(`梦境变换：${triggerMeshes[activeEventIndex].event.label}`);
+}
+
+function resetPlayer() {
+  yaw.position.set(0, 1.68, 10);
+  eventCount = 0;
+  activeEventIndex = 0;
+  yawAngle = 0;
+  pitchAngle = 0;
+  yaw.rotation.y = yawAngle;
+  pitch.rotation.x = pitchAngle;
+  velocity.set(0, 0, 0);
+  triggerMeshes.forEach((item) => {
+    item.triggered = false;
+    item.base.material.opacity = 0.42;
+  });
+  blackout.classList.remove("active");
+  if (ghost) ghost.visible = false;
+  dialogue.classList.add("hidden");
 }
 
 function updatePlayer(dt) {
@@ -1287,6 +1455,7 @@ document.addEventListener("keydown", (event) => {
   if (isEditingText(event.target)) return;
   keys.add(event.code);
   if (event.code === "KeyE") interactPressed = true;
+  if (event.code === "KeyT") transformToNextScene();
 });
 document.addEventListener("keyup", (event) => keys.delete(event.code));
 
@@ -1367,7 +1536,16 @@ toneSwatches.addEventListener("click", (event) => {
   const swatch = event.target.closest(".swatch");
   if (!swatch) return;
   swatch.classList.toggle("selected");
+  customToneInput.value = swatch.dataset.color;
   if (!toneSwatches.querySelector(".swatch.selected")) swatch.classList.add("selected");
+  if (currentDraft) {
+    currentDraft.styleProfile = getStyleProfile();
+    syncDraftFromPanel({ regenerateStory: true });
+  }
+});
+
+customToneInput.addEventListener("input", () => {
+  toneSwatches.querySelectorAll(".swatch").forEach((button) => button.classList.remove("selected"));
   if (currentDraft) {
     currentDraft.styleProfile = getStyleProfile();
     syncDraftFromPanel({ regenerateStory: true });
@@ -1405,6 +1583,8 @@ replayButton.addEventListener("click", () => {
   resetPlayer();
   writeLog("触发状态已重置。");
 });
+
+transformSceneButton.addEventListener("click", transformToNextScene);
 
 openComposeButton.addEventListener("click", () => {
   setMode("compose");
