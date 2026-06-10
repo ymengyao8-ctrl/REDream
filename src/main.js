@@ -34,9 +34,35 @@ app.innerHTML = `
           <span class="hint">先解析分镜，再生成场景</span>
         </label>
         <textarea id="dream-input" spellcheck="false"></textarea>
+        <section class="style-panel" id="style-panel">
+          <div class="style-group">
+            <span>主色调</span>
+            <div class="swatches" id="tone-swatches">
+              <button type="button" class="swatch selected" data-color="#f4a7c5" style="--swatch:#f4a7c5" aria-label="粉色"></button>
+              <button type="button" class="swatch" data-color="#f2d36b" style="--swatch:#f2d36b" aria-label="暖黄色"></button>
+              <button type="button" class="swatch" data-color="#8fd3ff" style="--swatch:#8fd3ff" aria-label="天蓝色"></button>
+              <button type="button" class="swatch" data-color="#8bd99e" style="--swatch:#8bd99e" aria-label="薄荷绿"></button>
+              <button type="button" class="swatch" data-color="#a7a7ad" style="--swatch:#a7a7ad" aria-label="灰色"></button>
+              <button type="button" class="swatch" data-color="#111217" style="--swatch:#111217" aria-label="黑色"></button>
+            </div>
+          </div>
+          <div class="style-group">
+            <span>关键词</span>
+            <div class="mood-chips" id="mood-chips">
+              <button type="button" data-mood="平静">平静</button>
+              <button type="button" data-mood="害怕">害怕</button>
+              <button type="button" data-mood="恐惧">恐惧</button>
+              <button type="button" data-mood="悬疑">悬疑</button>
+              <button type="button" data-mood="激动">激动</button>
+              <button type="button" data-mood="甜蜜" class="selected">甜蜜</button>
+              <button type="button" data-mood="暧昧">暧昧</button>
+              <button type="button" data-mood="神圣">神圣</button>
+            </div>
+          </div>
+        </section>
         <div class="button-row">
           <button class="primary" type="submit">解析梦境</button>
-          <button type="button" id="generate-direct">直接生成</button>
+          <button type="button" id="generate-direct">REDream now</button>
         </div>
       </form>
 
@@ -56,7 +82,7 @@ app.innerHTML = `
         </details>
         <div class="storyboard" id="storyboard"></div>
         <div class="button-row">
-          <button class="primary" type="button" id="confirm-dream">确认并生成可回放梦境</button>
+          <button class="primary" type="button" id="confirm-dream">REDream</button>
           <button type="button" id="refresh-draft">从原文重新解析</button>
           <button type="button" id="save-dream">保存 .redream</button>
           <button type="button" id="load-dream">导入 .redream</button>
@@ -117,6 +143,8 @@ const openComposeButton = document.querySelector("#open-compose");
 const openDraftButton = document.querySelector("#open-draft");
 const toggleLogButton = document.querySelector("#toggle-log");
 const logPopover = document.querySelector("#log-popover");
+const toneSwatches = document.querySelector("#tone-swatches");
+const moodChips = document.querySelector("#mood-chips");
 
 input.value = DEFAULT_DREAM;
 
@@ -134,6 +162,24 @@ function setMode(mode) {
 
 function isEditingText(target = document.activeElement) {
   return target?.matches?.("input, textarea, select, [contenteditable='true']");
+}
+
+function getStyleProfile() {
+  const colors = [...toneSwatches.querySelectorAll(".swatch.selected")].map((button) => button.dataset.color);
+  const moods = [...moodChips.querySelectorAll(".selected")].map((button) => button.dataset.mood);
+  return {
+    palette: colors.length ? colors : ["#a7a7ad"],
+    moods: moods.length ? moods : ["平静"],
+  };
+}
+
+function applyStyleProfile(profile = getStyleProfile()) {
+  toneSwatches.querySelectorAll(".swatch").forEach((button) => {
+    button.classList.toggle("selected", profile.palette?.includes(button.dataset.color));
+  });
+  moodChips.querySelectorAll("button").forEach((button) => {
+    button.classList.toggle("selected", profile.moods?.includes(button.dataset.mood));
+  });
 }
 
 const scene = new THREE.Scene();
@@ -389,7 +435,9 @@ function createScenePlan(draft) {
     version: 1,
     generator: "local-rule-planner",
     environment: globalEnvironment,
-    mood: draft.scenes.map((scene) => scene.mood).filter(Boolean).join(", "),
+    mood: draft.styleProfile?.moods?.join(", ") || draft.scenes.map((scene) => scene.mood).filter(Boolean).join(", "),
+    palette: draft.styleProfile?.palette || ["#a7a7ad"],
+    styleProfile: draft.styleProfile || { palette: ["#a7a7ad"], moods: ["平静"] },
     spaces,
     objects: [...new Set(spaces.flatMap((space) => space.objects))],
     events: draft.scenes.map((scene, index) => ({
@@ -406,7 +454,7 @@ function createScenePlan(draft) {
   };
 }
 
-function createDreamDraft(text) {
+function createDreamDraft(text, styleProfile = getStyleProfile()) {
   const source = compactText(text || DEFAULT_DREAM);
   const sceneTexts = splitIntoSceneTexts(source);
   const scenes = sceneTexts.map((sceneText, index) => {
@@ -429,22 +477,37 @@ function createDreamDraft(text) {
   return withScenePlan({
     title: scenes[0]?.location ? `${scenes[0].location}的梦` : "未命名梦境",
     raw: source,
-    story: polishDreamStory(scenes),
+    styleProfile,
+    story: polishDreamStory(scenes, styleProfile),
     scenes,
   });
 }
 
 function withScenePlan(draft) {
   const nextDraft = { ...draft, scenes: draft.scenes.map((scene) => ({ ...scene })) };
+  nextDraft.styleProfile = draft.styleProfile || getStyleProfile();
   nextDraft.scenePlan = createScenePlan(nextDraft);
   return nextDraft;
 }
 
-function polishDreamStory(scenes) {
+function getStyleLanguage(styleProfile = getStyleProfile()) {
+  const moods = styleProfile.moods || [];
+  if (moods.includes("甜蜜")) return { texture: "柔软、明亮，像糖纸在光里慢慢展开", verb: "轻轻靠近", order: "被一种温柔的期待推着往前" };
+  if (moods.includes("暧昧")) return { texture: "潮热、贴近，很多话停在嘴边", verb: "试探着靠近", order: "像有人在暗处等一个眼神" };
+  if (moods.includes("恐惧") || moods.includes("害怕")) return { texture: "冰冷、逼仄，每个角落都像藏着回声", verb: "僵硬地靠近", order: "被一股不讲道理的恐惧拖着走" };
+  if (moods.includes("悬疑")) return { texture: "安静、紧绷，细节像线索一样发亮", verb: "迟疑地靠近", order: "像谜面正在一点点翻开" };
+  if (moods.includes("激动")) return { texture: "明快、跳动，空气里有一种快要溢出的速度", verb: "急切地靠近", order: "被突然升高的心跳推着向前" };
+  if (moods.includes("神圣")) return { texture: "庄重、发亮，像旧仪式还残留在空气里", verb: "屏住呼吸靠近", order: "被某种不可解释的召唤牵引" };
+  return { texture: "平静、清透，像早晨没有完全醒来的光", verb: "慢慢靠近", order: "被轻微的好奇心带着往前" };
+}
+
+function polishDreamStory(scenes, styleProfile = getStyleProfile()) {
+  const language = getStyleLanguage(styleProfile);
+  const colorLine = styleProfile.palette?.length ? `整个梦被${styleProfile.palette.join("、")}这样的色调罩着，` : "";
   return scenes
     .map((scene, index) => {
       const lead = index === 0 ? "梦一开始" : index === scenes.length - 1 ? "到最后" : "后来";
-      return `${lead}，我在${scene.location}。这里的气氛是${scene.mood}，${scene.event}。${scene.characters.replace(/、/g, "和")}像是早就被安排在这里，只有我还不确定自己为什么会回来。触发点藏在“${scene.trigger}”这一刻：当它发生时，场景的秩序会突然松动，梦里的声音说：“${scene.dialogue}”`;
+      return `${lead}，我在${scene.location}。${colorLine}这里的质感是${language.texture}，${scene.event}。${scene.characters.replace(/、/g, "和")}像是早就被安排在这里，只有我还不确定自己为什么会回来。触发点藏在“${scene.trigger}”这一刻：当我${language.verb}时，场景的秩序会突然松动，我也${language.order}，梦里的声音说：“${scene.dialogue}”`;
     })
     .join("\n\n");
 }
@@ -452,6 +515,7 @@ function polishDreamStory(scenes) {
 function renderDraft(draft) {
   draft = withScenePlan(draft);
   currentDraft = draft;
+  applyStyleProfile(draft.styleProfile);
   lastParsedRaw = draft.raw || input.value.trim() || DEFAULT_DREAM;
   storyOutput.value = draft.story;
   scenePlanOutput.textContent = JSON.stringify(draft.scenePlan, null, 2);
@@ -524,7 +588,8 @@ function readDraftFromPanel() {
   return withScenePlan({
     title: scenes[0]?.location ? `${scenes[0].location}的梦` : "未命名梦境",
     raw: input.value.trim() || DEFAULT_DREAM,
-    story: storyOutput.value.trim() || polishDreamStory(scenes),
+    styleProfile: currentDraft?.styleProfile || getStyleProfile(),
+    story: storyOutput.value.trim() || polishDreamStory(scenes, currentDraft?.styleProfile || getStyleProfile()),
     scenes,
   });
 }
@@ -533,7 +598,8 @@ function syncDraftFromPanel({ regenerateStory = false } = {}) {
   if (draftPanel.classList.contains("hidden") || !storyboard.children.length) return currentDraft;
   const draft = readDraftFromPanel();
   if (regenerateStory) {
-    draft.story = polishDreamStory(draft.scenes);
+    draft.styleProfile = currentDraft?.styleProfile || getStyleProfile();
+    draft.story = polishDreamStory(draft.scenes, draft.styleProfile);
     storyOutput.value = draft.story;
   }
   currentDraft = withScenePlan(draft);
@@ -628,6 +694,7 @@ function buildDreamModel(source) {
       features,
       environment: plan.environment || inferEnvironment(combined),
       plan,
+      styleProfile: source.styleProfile || plan.styleProfile,
       story: source.story,
       events: source.scenes.map((scene, index) => ({
         id: scene.id,
@@ -659,6 +726,7 @@ function buildDreamModel(source) {
     mood: hasShrine ? "神圣又压抑" : hasWater ? "潮湿、迟滞" : "安静、低压",
     features: { hasHospital, hasTrain, hasWater, hasShrine, hasGhost, hasBlackout },
     environment: inferEnvironment(text),
+    styleProfile: getStyleProfile(),
     events: [
       {
         id: "shrine",
@@ -900,7 +968,24 @@ function addTextPlane(text, position, color = 0xe9eadb) {
   world.add(mesh);
 }
 
-function applyAtmosphere(environment, features) {
+function hexToNumber(hex, fallback = 0x89d6a3) {
+  if (!hex) return fallback;
+  return Number.parseInt(String(hex).replace("#", ""), 16) || fallback;
+}
+
+function tintColor(hex, factor = 0.55) {
+  const color = new THREE.Color(hexToNumber(hex));
+  color.multiplyScalar(factor);
+  return color.getHex();
+}
+
+function isBrightProfile(styleProfile) {
+  const moods = styleProfile?.moods || [];
+  return moods.some((mood) => ["甜蜜", "平静", "激动", "暧昧"].includes(mood));
+}
+
+function applyAtmosphere(environment, features, styleProfile = getStyleProfile()) {
+  const primary = styleProfile.palette?.[0] || "#89d6a3";
   const settings = {
     palace: { background: 0x13201a, fog: 0.025, hemi: 0xe7d6a2 },
     bedroom: { background: 0x10100f, fog: 0.035, hemi: 0xc8b8a0 },
@@ -910,9 +995,14 @@ function applyAtmosphere(environment, features) {
     corridor: { background: 0x070909, fog: 0.04, hemi: 0xb8d3ca },
   }[environment] || { background: 0x070909, fog: 0.04, hemi: 0xb8d3ca };
 
-  scene.background = new THREE.Color(settings.background);
-  scene.fog = new THREE.FogExp2(settings.background, features.hasBlackout ? settings.fog + 0.018 : settings.fog);
-  return settings;
+  const background = features.hasBlackout ? tintColor(primary, 0.12) : tintColor(primary, isBrightProfile(styleProfile) ? 0.42 : 0.22);
+  scene.background = new THREE.Color(background || settings.background);
+  scene.fog = new THREE.FogExp2(background || settings.background, features.hasBlackout ? settings.fog + 0.018 : isBrightProfile(styleProfile) ? Math.max(settings.fog - 0.012, 0.012) : settings.fog);
+  return {
+    ...settings,
+    hemi: hexToNumber(primary, settings.hemi),
+    accent: hexToNumber(styleProfile.palette?.[1] || primary, 0xd6b36b),
+  };
 }
 
 function addBaseSkeleton(environment) {
@@ -991,11 +1081,11 @@ function buildWorld(source) {
   statusEl.textContent = `${dreamModel.mood}。靠近发光位置会触发情节。`;
   document.body.dataset.environment = dreamModel.environment;
 
-  const atmosphere = applyAtmosphere(dreamModel.environment, dreamModel.features);
+  const atmosphere = applyAtmosphere(dreamModel.environment, dreamModel.features, dreamModel.plan?.styleProfile || dreamModel.styleProfile);
   const ambient = new THREE.HemisphereLight(atmosphere.hemi, 0x0c0f0b, dreamModel.environment === "palace" ? 0.78 : 0.54);
   world.add(ambient);
 
-  const keyLight = new THREE.DirectionalLight(0xc9d7c0, 0.72);
+  const keyLight = new THREE.DirectionalLight(atmosphere.accent || 0xc9d7c0, isBrightProfile(dreamModel.plan?.styleProfile || dreamModel.styleProfile) ? 0.94 : 0.72);
   keyLight.position.set(-8, 11, 4);
   keyLight.castShadow = true;
   keyLight.shadow.mapSize.set(2048, 2048);
@@ -1271,6 +1361,28 @@ dreamFileInput.addEventListener("change", () => {
   const file = dreamFileInput.files?.[0];
   if (file) loadDreamFile(file);
   dreamFileInput.value = "";
+});
+
+toneSwatches.addEventListener("click", (event) => {
+  const swatch = event.target.closest(".swatch");
+  if (!swatch) return;
+  swatch.classList.toggle("selected");
+  if (!toneSwatches.querySelector(".swatch.selected")) swatch.classList.add("selected");
+  if (currentDraft) {
+    currentDraft.styleProfile = getStyleProfile();
+    syncDraftFromPanel({ regenerateStory: true });
+  }
+});
+
+moodChips.addEventListener("click", (event) => {
+  const chip = event.target.closest("button[data-mood]");
+  if (!chip) return;
+  chip.classList.toggle("selected");
+  if (!moodChips.querySelector(".selected")) chip.classList.add("selected");
+  if (currentDraft) {
+    currentDraft.styleProfile = getStyleProfile();
+    syncDraftFromPanel({ regenerateStory: true });
+  }
 });
 
 storyboard.addEventListener("input", () => {
