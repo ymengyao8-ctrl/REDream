@@ -8,7 +8,7 @@ const DEFAULT_DREAM = `旧医院的走廊，没有窗，墙上贴着褪色的海
 
 const app = document.querySelector("#app");
 app.innerHTML = `
-  <main class="shell">
+  <main class="shell mode-compose" id="shell">
     <div id="three-root"></div>
     <section class="hud">
       <div class="topbar">
@@ -37,7 +37,6 @@ app.innerHTML = `
         <div class="button-row">
           <button class="primary" type="submit">解析梦境</button>
           <button type="button" id="generate-direct">直接生成</button>
-          <button type="button" id="replay">重放触发</button>
         </div>
       </form>
 
@@ -61,9 +60,17 @@ app.innerHTML = `
         <input class="file-input" id="dream-file" type="file" accept=".redream,application/json" />
       </section>
 
-      <div class="event-log" id="event-log">
-        <strong>触发记录</strong>
-        <div class="entry">还没有触发。靠近发光物体试试。</div>
+      <div class="play-dock" id="play-dock">
+        <button type="button" id="open-compose">文本</button>
+        <button type="button" id="open-draft">分镜</button>
+        <button type="button" id="toggle-log" aria-label="打开记录">＋</button>
+        <div class="log-popover hidden" id="log-popover">
+          <div class="event-log" id="event-log">
+            <strong>触发记录</strong>
+            <div class="entry">还没有触发。靠近发光物体试试。</div>
+          </div>
+          <button type="button" id="replay">重放触发</button>
+        </div>
       </div>
 
       <div class="interaction-prompt hidden" id="interaction-prompt">按 E 触发</div>
@@ -75,24 +82,15 @@ app.innerHTML = `
 
       <div class="blackout" id="blackout"></div>
       <div class="vignette"></div>
-
-      <div class="overlay" id="overlay">
-        <div class="start-card">
-          <h2>把梦走回去</h2>
-          <p>这是一个可玩的最小原型：先把碎片化梦境解析成分镜和触发器，确认后生成一段可以第一视角回放的梦核场景。</p>
-          <button class="primary" id="start" type="button">进入梦境</button>
-        </div>
-      </div>
     </section>
   </main>
 `;
 
+const shell = document.querySelector("#shell");
 const input = document.querySelector("#dream-input");
 const form = document.querySelector("#composer");
 const statusEl = document.querySelector("#status");
 const titleEl = document.querySelector("#scene-title");
-const overlay = document.querySelector("#overlay");
-const startButton = document.querySelector("#start");
 const dialogue = document.querySelector("#dialogue");
 const speaker = document.querySelector("#speaker");
 const line = document.querySelector("#line");
@@ -110,8 +108,28 @@ const interactionPrompt = document.querySelector("#interaction-prompt");
 const saveDreamButton = document.querySelector("#save-dream");
 const loadDreamButton = document.querySelector("#load-dream");
 const dreamFileInput = document.querySelector("#dream-file");
+const openComposeButton = document.querySelector("#open-compose");
+const openDraftButton = document.querySelector("#open-draft");
+const toggleLogButton = document.querySelector("#toggle-log");
+const logPopover = document.querySelector("#log-popover");
 
 input.value = DEFAULT_DREAM;
+
+function setMode(mode) {
+  shell.classList.remove("mode-compose", "mode-draft", "mode-play");
+  shell.classList.add(`mode-${mode}`);
+  logPopover.classList.add("hidden");
+  if (mode !== "play" && document.pointerLockElement === renderer?.domElement) {
+    document.exitPointerLock();
+  }
+  if (mode === "compose") {
+    window.setTimeout(() => input.focus(), 0);
+  }
+}
+
+function isEditingText(target = document.activeElement) {
+  return target?.matches?.("input, textarea, select, [contenteditable='true']");
+}
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x060807);
@@ -294,6 +312,15 @@ function inferDialogue(text) {
   return "这里像是在等你把它想起来。";
 }
 
+function inferEnvironment(text) {
+  if (/宫殿|王国|骑士|水池|城堡|花园/.test(text)) return "palace";
+  if (/卧室|床|躺|枕头|被子|手机/.test(text)) return "bedroom";
+  if (/电梯|公寓|楼道/.test(text)) return "elevator";
+  if (/学校|教室|讲台|老师|卷子|课桌/.test(text)) return "classroom";
+  if (/地铁|站台|列车|售票|隧道/.test(text)) return "station";
+  return "corridor";
+}
+
 function createDreamDraft(text) {
   const source = compactText(text || DEFAULT_DREAM);
   const sceneTexts = splitIntoSceneTexts(source);
@@ -361,6 +388,7 @@ function renderDraft(draft) {
     )
     .join("");
   draftPanel.classList.remove("hidden");
+  setMode("draft");
 }
 
 function updateSceneBadges() {
@@ -503,6 +531,7 @@ function buildDreamModel(source) {
       title: source.title,
       mood: source.scenes.map((scene) => scene.mood).filter(Boolean).slice(0, 2).join("、") || "梦境化",
       features,
+      environment: inferEnvironment(combined),
       story: source.story,
       events: source.scenes.map((scene, index) => ({
         id: scene.id,
@@ -532,6 +561,7 @@ function buildDreamModel(source) {
     title: hasHospital && hasTrain ? "旧医院尽头的地铁站" : hasTrain ? "无人站台" : hasHospital ? "没有窗的走廊" : "梦核房间",
     mood: hasShrine ? "神圣又压抑" : hasWater ? "潮湿、迟滞" : "安静、低压",
     features: { hasHospital, hasTrain, hasWater, hasShrine, hasGhost, hasBlackout },
+    environment: inferEnvironment(text),
     events: [
       {
         id: "shrine",
@@ -773,13 +803,99 @@ function addTextPlane(text, position, color = 0xe9eadb) {
   world.add(mesh);
 }
 
+function applyAtmosphere(environment, features) {
+  const settings = {
+    palace: { background: 0x13201a, fog: 0.025, hemi: 0xe7d6a2 },
+    bedroom: { background: 0x10100f, fog: 0.035, hemi: 0xc8b8a0 },
+    classroom: { background: 0x101412, fog: 0.03, hemi: 0xcbd6ca },
+    elevator: { background: 0x080b0d, fog: 0.04, hemi: 0xbfd2d3 },
+    station: { background: 0x060807, fog: 0.045, hemi: 0xb8d3ca },
+    corridor: { background: 0x070909, fog: 0.04, hemi: 0xb8d3ca },
+  }[environment] || { background: 0x070909, fog: 0.04, hemi: 0xb8d3ca };
+
+  scene.background = new THREE.Color(settings.background);
+  scene.fog = new THREE.FogExp2(settings.background, features.hasBlackout ? settings.fog + 0.018 : settings.fog);
+  return settings;
+}
+
+function addBaseSkeleton(environment) {
+  const wallMat = environment === "palace" ? new THREE.MeshStandardMaterial({ color: 0x7f7359, roughness: 0.82 }) : palette.concrete;
+  const floorMat = environment === "palace" ? new THREE.MeshStandardMaterial({ color: 0x4a4f3f, roughness: 0.72 }) : palette.darkConcrete;
+
+  addBox({ size: [15, 0.22, 74], position: [0, -0.1, -14], material: floorMat, cast: false });
+
+  if (environment === "palace") {
+    addBox({ size: [22, 0.2, 48], position: [0, -0.02, -13], material: floorMat, cast: false });
+    addBox({ size: [2.6, 0.08, 4.8], position: [0, 0.03, -7], material: palette.water, cast: false });
+    for (let z = 8; z > -34; z -= 7) {
+      addCylinder({ radius: 0.28, height: 4.6, position: [-8.2, 2.2, z], material: wallMat });
+      addCylinder({ radius: 0.28, height: 4.6, position: [8.2, 2.2, z], material: wallMat });
+      const light = new THREE.PointLight(0xd6b36b, 1.0, 11);
+      light.position.set(0, 3.6, z);
+      world.add(light);
+    }
+    addTextPlane("宫殿大厅", [0, 2.8, 7], 0xd6b36b);
+    return;
+  }
+
+  if (environment === "bedroom") {
+    addBox({ size: [13, 3.6, 0.24], position: [0, 1.75, -28], material: wallMat, cast: false });
+    addBox({ size: [0.24, 3.6, 34], position: [-6.5, 1.75, -8], material: wallMat, cast: false });
+    addBox({ size: [0.24, 3.6, 34], position: [6.5, 1.75, -8], material: wallMat, cast: false });
+    addBox({ size: [13, 0.2, 34], position: [0, 3.55, -8], material: palette.darkConcrete, cast: false });
+    const lamp = new THREE.PointLight(0xd6b36b, 1.2, 16);
+    lamp.position.set(-2.5, 3.0, 3);
+    world.add(lamp);
+    addBed([1.8, 0.55, -5.8]);
+    addTextPlane("卧室", [0, 2.5, 5], 0xd6b36b);
+    return;
+  }
+
+  if (environment === "classroom") {
+    addBox({ size: [16, 0.22, 44], position: [0, -0.1, -10], material: floorMat, cast: false });
+    addBox({ size: [16, 3.8, 0.24], position: [0, 1.8, -28], material: wallMat, cast: false });
+    addBox({ size: [0.24, 3.8, 44], position: [-8, 1.8, -10], material: wallMat, cast: false });
+    addBox({ size: [0.24, 3.8, 44], position: [8, 1.8, -10], material: wallMat, cast: false });
+    addBox({ size: [4.2, 0.82, 1.2], position: [0, 0.45, -21], material: palette.amber });
+    addTextPlane("讲台", [0, 1.55, -20.4], 0xd6b36b);
+    for (let z = 2; z > -16; z -= 5) {
+      for (let x of [-4.4, 0, 4.4]) addBox({ size: [1.6, 0.64, 1.0], position: [x, 0.36, z], material: palette.paper });
+    }
+    const light = new THREE.PointLight(0xcbd6ca, 1.25, 18);
+    light.position.set(0, 3.2, -4);
+    world.add(light);
+    return;
+  }
+
+  const isElevator = environment === "elevator";
+  addBox({ size: [15, 0.26, 74], position: [0, 4.2, -14], material: palette.darkConcrete, cast: false });
+  addBox({ size: [0.24, 4.5, 74], position: [-7.5, 2, -14], material: wallMat, cast: false });
+  addBox({ size: [0.24, 4.5, 74], position: [7.5, 2, -14], material: wallMat, cast: false });
+
+  for (let z = 8; z > -42; z -= 8) {
+    addBox({ size: [0.16, 4, 0.16], position: [-5.8, 1.9, z], material: wallMat });
+    addBox({ size: [0.16, 4, 0.16], position: [5.8, 1.9, z], material: wallMat });
+    const lamp = new THREE.PointLight(z % 16 === 0 ? 0x89d6a3 : 0xd6b36b, isElevator ? 1.05 : 0.82, 9);
+    lamp.position.set(0, 3.6, z);
+    world.add(lamp);
+    addBox({ size: [1.2, 0.08, 0.28], position: [0, 3.55, z], material: palette.greenGlow, cast: false });
+  }
+
+  if (isElevator) {
+    addElevator([0, 1.52, 6.8]);
+    addTextPlane("电梯间", [0, 2.8, 4.8], 0x7fc5d8);
+  }
+}
+
 function buildWorld(source) {
   clearWorld();
   dreamModel = buildDreamModel(source);
   titleEl.textContent = dreamModel.title;
   statusEl.textContent = `${dreamModel.mood}。靠近发光位置会触发情节。`;
+  document.body.dataset.environment = dreamModel.environment;
 
-  const ambient = new THREE.HemisphereLight(0xb8d3ca, 0x0c0f0b, 0.54);
+  const atmosphere = applyAtmosphere(dreamModel.environment, dreamModel.features);
+  const ambient = new THREE.HemisphereLight(atmosphere.hemi, 0x0c0f0b, dreamModel.environment === "palace" ? 0.78 : 0.54);
   world.add(ambient);
 
   const keyLight = new THREE.DirectionalLight(0xc9d7c0, 0.72);
@@ -788,20 +904,7 @@ function buildWorld(source) {
   keyLight.shadow.mapSize.set(2048, 2048);
   world.add(keyLight);
 
-  addBox({ size: [15, 0.22, 74], position: [0, -0.1, -14], material: palette.darkConcrete, cast: false });
-  addBox({ size: [15, 0.26, 74], position: [0, 4.2, -14], material: palette.darkConcrete, cast: false });
-  addBox({ size: [0.24, 4.5, 74], position: [-7.5, 2, -14], material: palette.concrete, cast: false });
-  addBox({ size: [0.24, 4.5, 74], position: [7.5, 2, -14], material: palette.concrete, cast: false });
-
-  for (let z = 8; z > -42; z -= 8) {
-    addBox({ size: [0.16, 4, 0.16], position: [-5.8, 1.9, z], material: palette.concrete });
-    addBox({ size: [0.16, 4, 0.16], position: [5.8, 1.9, z], material: palette.concrete });
-
-    const lamp = new THREE.PointLight(z % 16 === 0 ? 0x89d6a3 : 0xd6b36b, 0.82, 9);
-    lamp.position.set(0, 3.6, z);
-    world.add(lamp);
-    addBox({ size: [1.2, 0.08, 0.28], position: [0, 3.55, z], material: palette.greenGlow, cast: false });
-  }
+  addBaseSkeleton(dreamModel.environment);
 
   if (dreamModel.features.hasHospital) {
     for (let i = 0; i < 8; i += 1) {
@@ -906,6 +1009,10 @@ function fireEvent(item) {
 }
 
 function updatePlayer(dt) {
+  if (isEditingText()) {
+    velocity.set(0, 0, 0);
+    return;
+  }
   direction.set(0, 0, 0);
   if (keys.has("KeyW")) direction.z -= 1;
   if (keys.has("KeyS")) direction.z += 1;
@@ -990,6 +1097,7 @@ function animate() {
 }
 
 document.addEventListener("keydown", (event) => {
+  if (isEditingText(event.target)) return;
   keys.add(event.code);
   if (event.code === "KeyE") interactPressed = true;
 });
@@ -1032,6 +1140,7 @@ directGenerateButton.addEventListener("click", () => {
   const draft = usesCurrentDraft ? syncDraftFromPanel() || currentDraft : createDreamDraft(raw);
   renderDraft(draft);
   buildWorld(draft);
+  setMode("play");
   writeLog(usesCurrentDraft ? "已根据当前分镜直接生成梦境。" : "已根据自动分镜直接生成梦境。");
 });
 
@@ -1041,6 +1150,7 @@ confirmDreamButton.addEventListener("click", () => {
   currentDraft = draft;
   buildWorld(draft);
   draftPanel.classList.add("hidden");
+  setMode("play");
   writeLog("已根据确认后的分镜生成梦境。");
 });
 
@@ -1051,6 +1161,7 @@ refreshDraftButton.addEventListener("click", () => {
 
 closeDraftButton.addEventListener("click", () => {
   draftPanel.classList.add("hidden");
+  setMode(dreamModel ? "play" : "compose");
 });
 
 saveDreamButton.addEventListener("click", saveDreamFile);
@@ -1086,11 +1197,20 @@ replayButton.addEventListener("click", () => {
   writeLog("触发状态已重置。");
 });
 
-startButton.addEventListener("click", () => {
-  overlay.style.display = "none";
+openComposeButton.addEventListener("click", () => {
+  setMode("compose");
+});
+
+openDraftButton.addEventListener("click", () => {
+  renderDraft(currentDraft || createDreamDraft(input.value.trim() || DEFAULT_DREAM));
+});
+
+toggleLogButton.addEventListener("click", () => {
+  logPopover.classList.toggle("hidden");
 });
 
 buildWorld(DEFAULT_DREAM);
+setMode("compose");
 const dreamParam = new URLSearchParams(window.location.search).get("dream");
 if (dreamParam) {
   const draft = createDreamDraft(dreamParam);
@@ -1098,6 +1218,7 @@ if (dreamParam) {
   input.value = dreamParam;
   renderDraft(draft);
   buildWorld(draft);
+  setMode("draft");
 }
 window.__dreamDebug = {
   getPosition: () => ({ x: yaw.position.x, y: yaw.position.y, z: yaw.position.z }),
