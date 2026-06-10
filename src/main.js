@@ -50,6 +50,10 @@ app.innerHTML = `
         </div>
         <label class="story-label" for="story-output">润色后的梦境文本</label>
         <textarea id="story-output" class="story-output" spellcheck="false"></textarea>
+        <details class="plan-details">
+          <summary>Scene Plan JSON</summary>
+          <pre id="scene-plan-output"></pre>
+        </details>
         <div class="storyboard" id="storyboard"></div>
         <div class="button-row">
           <button class="primary" type="button" id="confirm-dream">确认并生成可回放梦境</button>
@@ -100,6 +104,7 @@ const replayButton = document.querySelector("#replay");
 const directGenerateButton = document.querySelector("#generate-direct");
 const draftPanel = document.querySelector("#draft-panel");
 const storyOutput = document.querySelector("#story-output");
+const scenePlanOutput = document.querySelector("#scene-plan-output");
 const storyboard = document.querySelector("#storyboard");
 const confirmDreamButton = document.querySelector("#confirm-dream");
 const refreshDraftButton = document.querySelector("#refresh-draft");
@@ -226,10 +231,12 @@ function compactText(text) {
 }
 
 function splitSentences(text) {
-  return text
+  const normalized = text.replace(/(然后|后来|接着|突然|之后|镜头一转|停电后|灯灭后|断电后)/g, "\n$1");
+  return normalized
     .replace(/\r/g, "")
     .split(/(?<=[。！？!?])|\n+/)
     .map((part) => compactText(part))
+    .filter((part) => !/^(然后|后来|接着|突然|之后)$/.test(part))
     .filter(Boolean);
 }
 
@@ -314,11 +321,89 @@ function inferDialogue(text) {
 
 function inferEnvironment(text) {
   if (/宫殿|王国|骑士|水池|城堡|花园/.test(text)) return "palace";
-  if (/卧室|床|躺|枕头|被子|手机/.test(text)) return "bedroom";
   if (/电梯|公寓|楼道/.test(text)) return "elevator";
+  if (/卧室|床|躺|枕头|被子|手机/.test(text)) return "bedroom";
   if (/学校|教室|讲台|老师|卷子|课桌/.test(text)) return "classroom";
   if (/地铁|站台|列车|售票|隧道/.test(text)) return "station";
   return "corridor";
+}
+
+function inferSpaceType(text) {
+  if (/宫殿|王国|骑士|水池|城堡|花园/.test(text)) return "pool_hall";
+  if (/电梯|公寓|楼道/.test(text)) return "elevator_lobby";
+  if (/卧室|床|躺|枕头|被子|手机/.test(text)) return "bedroom";
+  if (/学校|教室|讲台|老师|卷子|课桌/.test(text)) return "classroom";
+  if (/地铁|站台|列车|售票|隧道/.test(text)) return "subway_platform";
+  if (/医院|病房|护士/.test(text)) return "hospital_corridor";
+  return "liminal_corridor";
+}
+
+function environmentFromSpaceType(type) {
+  return {
+    pool_hall: "palace",
+    bedroom: "bedroom",
+    elevator_lobby: "elevator",
+    classroom: "classroom",
+    subway_platform: "station",
+    hospital_corridor: "corridor",
+    liminal_corridor: "corridor",
+  }[type] || "corridor";
+}
+
+function inferObjects(text) {
+  const objectRules = [
+    ["girl", /女生|女人|长发/],
+    ["shadow", /鬼|黑影|影子|长发女/],
+    ["bed", /床|躺|床上|被子|枕/],
+    ["phone", /手机/],
+    ["mirror", /镜子|镜头/],
+    ["elevator", /电梯/],
+    ["door", /门口|门/],
+    ["water_pool", /水池|水|湖|海/],
+    ["teacher", /老师/],
+    ["desk", /讲台|课桌|卷子/],
+    ["shrine", /神龛|庙|祭坛|香/],
+    ["light_slit", /闪电|亮缝|亮|光/],
+  ];
+  return objectRules.filter(([, pattern]) => pattern.test(text)).map(([name]) => name);
+}
+
+function createScenePlan(draft) {
+  const sourceText = [draft.raw, draft.story, ...draft.scenes.flatMap((scene) => [scene.location, scene.characters, scene.event, scene.mood, scene.trigger, scene.dialogue])].join(" ");
+  const spaces = draft.scenes.map((scene, index) => {
+    const text = [scene.location, scene.characters, scene.event, scene.mood, scene.trigger, scene.dialogue].join(" ");
+    return {
+      id: scene.id,
+      name: scene.location,
+      type: inferSpaceType(text),
+      size: index === 0 ? "medium" : "small",
+      style: /宫殿|王国|骑士|神圣/.test(text) ? "palace" : inferEnvironment(text),
+      mood: scene.mood,
+      connectedBy: index === 0 ? "start" : /停电|灯灭|断电|黑/.test(text) ? "blackout_jump" : "dream_cut",
+      objects: inferObjects(text),
+    };
+  });
+  const globalEnvironment = spaces[0]?.style && spaces[0].style !== "corridor" ? spaces[0].style : environmentFromSpaceType(spaces[0]?.type) || inferEnvironment(sourceText);
+
+  return {
+    version: 1,
+    generator: "local-rule-planner",
+    environment: globalEnvironment,
+    mood: draft.scenes.map((scene) => scene.mood).filter(Boolean).join(", "),
+    spaces,
+    objects: [...new Set(spaces.flatMap((space) => space.objects))],
+    events: draft.scenes.map((scene, index) => ({
+      id: scene.id,
+      spaceId: scene.id,
+      trigger: scene.trigger,
+      triggerType: scene.triggerType,
+      speaker: scene.characters.split(/[、,，/]/).find(Boolean) || "梦里的人",
+      dialogue: scene.dialogue,
+      blackout: /停电|灯灭|断电|黑/.test(`${scene.event} ${scene.trigger}`),
+      ghost: /鬼|影子|黑影|陌生人/.test(`${scene.characters} ${scene.event}`),
+      order: index,
+    })),
+  };
 }
 
 function createDreamDraft(text) {
@@ -341,12 +426,18 @@ function createDreamDraft(text) {
     };
   });
 
-  return {
+  return withScenePlan({
     title: scenes[0]?.location ? `${scenes[0].location}的梦` : "未命名梦境",
     raw: source,
     story: polishDreamStory(scenes),
     scenes,
-  };
+  });
+}
+
+function withScenePlan(draft) {
+  const nextDraft = { ...draft, scenes: draft.scenes.map((scene) => ({ ...scene })) };
+  nextDraft.scenePlan = createScenePlan(nextDraft);
+  return nextDraft;
 }
 
 function polishDreamStory(scenes) {
@@ -359,9 +450,11 @@ function polishDreamStory(scenes) {
 }
 
 function renderDraft(draft) {
+  draft = withScenePlan(draft);
   currentDraft = draft;
   lastParsedRaw = draft.raw || input.value.trim() || DEFAULT_DREAM;
   storyOutput.value = draft.story;
+  scenePlanOutput.textContent = JSON.stringify(draft.scenePlan, null, 2);
   storyboard.innerHTML = draft.scenes
     .map(
       (scene, index) => `
@@ -428,12 +521,12 @@ function readDraftFromPanel() {
     };
   });
 
-  return {
+  return withScenePlan({
     title: scenes[0]?.location ? `${scenes[0].location}的梦` : "未命名梦境",
     raw: input.value.trim() || DEFAULT_DREAM,
     story: storyOutput.value.trim() || polishDreamStory(scenes),
     scenes,
-  };
+  });
 }
 
 function syncDraftFromPanel({ regenerateStory = false } = {}) {
@@ -443,10 +536,11 @@ function syncDraftFromPanel({ regenerateStory = false } = {}) {
     draft.story = polishDreamStory(draft.scenes);
     storyOutput.value = draft.story;
   }
-  currentDraft = draft;
+  currentDraft = withScenePlan(draft);
   lastParsedRaw = draft.raw;
+  scenePlanOutput.textContent = JSON.stringify(currentDraft.scenePlan, null, 2);
   updateSceneBadges();
-  return draft;
+  return currentDraft;
 }
 
 function extractQuotedDialogue(text) {
@@ -503,7 +597,7 @@ function loadDreamFile(file) {
   reader.addEventListener("load", () => {
     try {
       const payload = JSON.parse(String(reader.result || "{}"));
-      const draft = payload.draft || payload;
+      const draft = withScenePlan(payload.draft || payload);
       if (!draft?.scenes?.length) throw new Error("missing scenes");
       currentDraft = draft;
       input.value = draft.raw || input.value;
@@ -518,6 +612,7 @@ function loadDreamFile(file) {
 
 function buildDreamModel(source) {
   if (source?.scenes) {
+    const plan = source.scenePlan || createScenePlan(source);
     const combined = [source.raw, source.story, ...source.scenes.flatMap((scene) => [scene.location, scene.characters, scene.event, scene.mood, scene.trigger])].join(" ");
     const features = {
       hasHospital: /医院|病房|走廊|白色|护士/.test(combined),
@@ -531,18 +626,20 @@ function buildDreamModel(source) {
       title: source.title,
       mood: source.scenes.map((scene) => scene.mood).filter(Boolean).slice(0, 2).join("、") || "梦境化",
       features,
-      environment: inferEnvironment(combined),
+      environment: plan.environment || inferEnvironment(combined),
+      plan,
       story: source.story,
       events: source.scenes.map((scene, index) => ({
         id: scene.id,
         label: scene.trigger || scene.location,
         position: new THREE.Vector3(index % 2 === 0 ? -4.8 : 4.8, 1, -7 - index * 8.5),
         color: [0xd6b36b, 0x7fc5d8, 0xd58b9b, 0x89d6a3, 0xc7a2df, 0xe0c46f][index % 6],
-        speaker: scene.characters.split(/[、,，/]/).find(Boolean) || "梦里的人",
-        line: scene.dialogue,
-        blackout: /停电|灯灭|断电|黑/.test(`${scene.event} ${scene.trigger}`),
-        ghost: /鬼|影子|黑影|陌生人/.test(`${scene.characters} ${scene.event}`),
-        triggerType: scene.triggerType,
+        speaker: plan.events[index]?.speaker || scene.characters.split(/[、,，/]/).find(Boolean) || "梦里的人",
+        line: plan.events[index]?.dialogue || scene.dialogue,
+        blackout: plan.events[index]?.blackout ?? /停电|灯灭|断电|黑/.test(`${scene.event} ${scene.trigger}`),
+        ghost: plan.events[index]?.ghost ?? /鬼|影子|黑影|陌生人/.test(`${scene.characters} ${scene.event}`),
+        triggerType: plan.events[index]?.triggerType || scene.triggerType,
+        space: plan.spaces[index],
         scene,
       })),
     };
@@ -1226,6 +1323,7 @@ window.__dreamDebug = {
   getCanvasCount: () => document.querySelectorAll("canvas").length,
   getObjectCount: () => world.children.length,
   getPropLabels: () => [...propLabels],
+  getScenePlan: () => currentDraft?.scenePlan || dreamModel?.plan || null,
   generateFromText: (text) => {
     const draft = createDreamDraft(text || DEFAULT_DREAM);
     currentDraft = draft;

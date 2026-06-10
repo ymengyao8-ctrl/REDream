@@ -58,7 +58,18 @@ https://YOUR_NAME.github.io/YOUR_REPO/
 - 本地档案：可保存 `.redream` 文件，也可导入后继续修改和生成。
 - 三屏体验：全屏输入梦境、全屏确认分镜、全屏第一人称回放。
 - 场景骨架：根据内容切换走廊/站台、电梯间、卧室、教室、宫殿大厅等基础空间。
+- 场景规划：先把梦境分镜转换为 `scenePlan` JSON，再由 Three.js 按规划搭建空间、道具和触发点。
 - 输入保护：编辑文本时 `W A S D` 不会移动角色。
+
+## Scene Plan
+
+当前版本已经有中间规划层：
+
+```text
+用户文本 -> 分镜草稿 -> scenePlan JSON -> Three.js 场景
+```
+
+`scenePlan` 现在由本地规则生成，后续可以替换为 AI 输出，只要保持 `spaces / objects / mood / events` 结构即可。
 
 ## 下一步
 
